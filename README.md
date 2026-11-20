@@ -35,4 +35,6 @@ mygo vet .
 
 ## 致谢
 
-Hostern 的项目视图借鉴了 Mayoi 的项目页签设计，把多个工作目录放在同一窗口的侧栏中，方便快速切换。感谢 Mayoi 的启发。 [sorrycc/Mayoi](https://github.com/sorrycc/Mayoi)
+- 侧栏中集中管理多个工作目录的设计，借鉴了 Mayoi 的项目页签。 [Mayoi](https://github.com/sorrycc/Mayoi)
+- 应用界面基于 MyGo 的原生 UI，终端组件在 MyGo v0.4.5 的终端插件基础上修改。 [MyGo](https://github.com/egoist/mygo) · [插件许可证](internal/terminal/LICENSE)
+- 终端组件使用 Ghostty 的 `libghostty-vt` 解析终端控制序列并维护终端状态。 [Ghostty](https://github.com/ghostty-org/ghostty)
