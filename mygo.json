@@ -1,0 +1,6 @@
+{
+  "name": "Hostern",
+  "identifier": "com.dingxyang.localterm",
+  "version": "0.1.0",
+  "macos": { "minimumSystemVersion": "13.0" }
+}
