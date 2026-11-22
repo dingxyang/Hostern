@@ -84,6 +84,7 @@ type view struct {
 	scrollbar vt.Scrollbar
 	lines     []rowCache
 	shaped    lru
+	rowBuffer rowBuffer
 
 	keys    *vt.KeyEncoder
 	mouse   *vt.MouseEncoder

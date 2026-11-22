@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -36,20 +37,22 @@ func (a *localTerm) kindLabel(k entryKind) string {
 }
 
 type entry struct {
-	ID             string    `json:"id"`
-	Parent         string    `json:"parent,omitempty"`
-	Kind           entryKind `json:"kind"`
-	Name           string    `json:"name"`
-	Host           string    `json:"host,omitempty"`
-	User           string    `json:"user,omitempty"`
-	Port           string    `json:"port,omitempty"`
-	Path           string    `json:"path,omitempty"`
-	StartupCommand string    `json:"startupCommand,omitempty"`
-	InProjects     bool      `json:"inProjects,omitempty"`
-	ProjectTitle   string    `json:"projectTitle,omitempty"`
-	ProjectIcon    string    `json:"projectIcon,omitempty"`
-	ProjectImage   string    `json:"projectImage,omitempty"`
-	projectBitmap  *ui.Bitmap
+	ID               string    `json:"id"`
+	Parent           string    `json:"parent,omitempty"`
+	Kind             entryKind `json:"kind"`
+	Name             string    `json:"name"`
+	Host             string    `json:"host,omitempty"`
+	User             string    `json:"user,omitempty"`
+	Port             string    `json:"port,omitempty"`
+	IdentityFile     string    `json:"identityFile,omitempty"`
+	Path             string    `json:"path,omitempty"`
+	StartupCommand   string    `json:"startupCommand,omitempty"`
+	InProjects       bool      `json:"inProjects,omitempty"`
+	HiddenInProjects bool      `json:"hiddenInProjects,omitempty"`
+	ProjectTitle     string    `json:"projectTitle,omitempty"`
+	ProjectIcon      string    `json:"projectIcon,omitempty"`
+	ProjectImage     string    `json:"projectImage,omitempty"`
+	projectBitmap    *ui.Bitmap
 }
 
 var (
@@ -75,6 +78,9 @@ func (e entry) validated() (entry, error) {
 	} else if strings.ContainsAny(e.StartupCommand, "\r\n\x00") {
 		return e, errors.New("请输入单行启动命令")
 	}
+	if e.Kind != host {
+		e.IdentityFile = ""
+	}
 	switch e.Kind {
 	case category:
 		e.Host, e.User, e.Port, e.Path = "", "", "", ""
@@ -85,6 +91,11 @@ func (e entry) validated() (entry, error) {
 		e.Host, e.User, e.Port = "", "", ""
 	case host:
 		e.Path = ""
+		e.IdentityFile = strings.TrimSpace(e.IdentityFile)
+		if e.IdentityFile != "" && (strings.ContainsFunc(e.IdentityFile, unicode.IsControl) ||
+			(!filepath.IsAbs(e.IdentityFile) && !strings.HasPrefix(e.IdentityFile, "~/"))) {
+			return e, errors.New("请输入 SSH 私钥的绝对路径或以 ~/ 开头的路径")
+		}
 		e.Host = strings.TrimSpace(e.Host)
 		if strings.HasPrefix(e.Host, "[") && strings.HasSuffix(e.Host, "]") && strings.Contains(e.Host, ":") {
 			e.Host = e.Host[1 : len(e.Host)-1]
@@ -124,18 +135,73 @@ func checkDirectory(path string) error {
 }
 
 func (e entry) sshCommand() []string {
-	args := []string{"/usr/bin/ssh", "-tt"}
+	args := append([]string{"/usr/bin/ssh", "-tt"}, e.sshConnectionArgs()...)
+	if e.StartupCommand != "" {
+		args = append(args, e.StartupCommand)
+	}
+	return args
+}
+
+func (e entry) sshConnectionArgs() []string {
+	var args []string
 	if e.User != "" {
 		args = append(args, "-l", e.User)
 	}
 	if e.Port != "" {
 		args = append(args, "-p", e.Port)
 	}
-	args = append(args, "--", e.Host)
-	if e.StartupCommand != "" {
-		args = append(args, e.StartupCommand)
+	if e.IdentityFile != "" {
+		args = append(args, "-i", e.IdentityFile)
 	}
-	return args
+	return append(args, "--", e.Host)
+}
+
+func (e entry) sftpMasterCommand(socket string) []string {
+	args := []string{"/usr/bin/ssh", "-MN", "-S", socket, "-o", "ControlPersist=no",
+		"-o", "ClearAllForwardings=yes", "-o", "ForkAfterAuthentication=no"}
+	return append(args, e.sshConnectionArgs()...)
+}
+
+// sshIdentityNames recognizes private keys by inspecting only the beginning of each file.
+func sshIdentityNames() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	dir := filepath.Join(home, ".ssh")
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, file := range files {
+		name := file.Name()
+		if strings.HasSuffix(name, ".pub") || strings.ContainsFunc(name, unicode.IsControl) {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		var header [64]byte
+		n, _ := io.ReadFull(f, header[:])
+		f.Close()
+		line, _, _ := strings.Cut(string(header[:n]), "\n")
+		switch strings.TrimSuffix(line, "\r") {
+		case "-----BEGIN OPENSSH PRIVATE KEY-----",
+			"-----BEGIN PRIVATE KEY-----",
+			"-----BEGIN ENCRYPTED PRIVATE KEY-----",
+			"-----BEGIN RSA PRIVATE KEY-----",
+			"-----BEGIN EC PRIVATE KEY-----",
+			"-----BEGIN DSA PRIVATE KEY-----":
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 func loadEntries(path string) ([]entry, error) {

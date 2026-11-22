@@ -8,7 +8,7 @@ import (
 )
 
 func (e entry) isProject() bool {
-	return e.Kind == local || e.Kind == host && e.InProjects
+	return e.Kind == local && !e.HiddenInProjects || e.Kind == host && e.InProjects
 }
 
 func (a *localTerm) sessionProject(s *session) string {
@@ -63,21 +63,28 @@ func (a *localTerm) openProject(e entry) {
 	}
 }
 
-func (a *localTerm) setHostInProjects(c *ui.Context, e entry, inProjects bool) {
+func (a *localTerm) setProjectVisible(c *ui.Context, e entry, visible bool) {
 	if a.savingEntries {
 		return
 	}
 	i := entryIndex(a.entries, e.ID)
-	if i < 0 || a.entries[i].Kind != host {
+	if i < 0 {
 		return
 	}
 	next := slices.Clone(a.entries)
-	next[i].InProjects = inProjects
+	switch next[i].Kind {
+	case local:
+		next[i].HiddenInProjects = !visible
+	case host:
+		next[i].InProjects = visible
+	default:
+		return
+	}
 	if err := a.setEntries(next); err != nil {
 		c.Toast(a.tr("无法保存连接树：", "Could not save connections: ") + err.Error())
 		return
 	}
-	if inProjects {
+	if visible {
 		a.openProject(next[i])
 	} else {
 		a.syncProject()
@@ -155,8 +162,8 @@ func (a *localTerm) projectTab(c *ui.Context, e entry) {
 			if m.Item(a.tr("编辑配置", "Edit configuration")).Chosen() {
 				a.editor = &editor{entry: e, open: true}
 			}
-			if e.Kind == host && m.Item(a.tr("从项目视图移除", "Remove from project view")).Disabled(a.savingEntries).Chosen() {
-				a.setHostInProjects(c, e, false)
+			if m.Item(a.tr("关闭项目页签", "Close project tab")).Disabled(a.savingEntries).Chosen() {
+				a.setProjectVisible(c, e, false)
 			}
 		})
 	}
@@ -181,8 +188,16 @@ func (a *localTerm) addProjectMenu(m *ui.Menu, c *ui.Context) {
 	m.Submenu(a.tr("添加已有连接配置", "Add existing connection"), func(sub *ui.Menu) {
 		for _, e := range a.entries {
 			if available(e) && sub.Item(e.Name+" · "+e.Host).Chosen() {
-				a.setHostInProjects(c, e, true)
+				a.setProjectVisible(c, e, true)
 			}
 		}
 	}).Disabled(disabled || !slices.ContainsFunc(a.entries, available))
+	hiddenDirectory := func(e entry) bool { return e.Kind == local && e.HiddenInProjects }
+	m.Submenu(a.tr("恢复本地工作目录", "Restore local directory"), func(sub *ui.Menu) {
+		for _, e := range a.entries {
+			if hiddenDirectory(e) && sub.Item(e.Name+" · "+e.Path).Chosen() {
+				a.setProjectVisible(c, e, true)
+			}
+		}
+	}).Disabled(disabled || !slices.ContainsFunc(a.entries, hiddenDirectory))
 }

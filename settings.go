@@ -13,8 +13,26 @@ import (
 	"github.com/egoist/mygo/ui"
 )
 
+func (a *localTerm) settingsToolbar(c *ui.Context) {
+	bar := c.TitleBar()
+	ui.Row(c).Height(max(bar.Height, 32)).Shrink(0).AlignItems(ui.Center).
+		Padding(0, bar.Right+8, 0, bar.Left+8).Background(c.Theme().Background).DragWindow().Children(func() {
+		label := a.tr("返回", "Back")
+		button := ui.ButtonBase(c).Height(26).PaddingX(6).Gap(4).Center().Radius(5).
+			Label(label).OnClick(a.closeSettings)
+		if button.Hovered() {
+			button.Background(c.Theme().SurfaceHover)
+		}
+		button.Children(func() {
+			ui.Text(c, "←").FontSize(interfaceTextSize(c, 15)).TextColor(c.Theme().TextMuted)
+			ui.Text(c, label).FontSize(interfaceTextSize(c, 12)).TextColor(c.Theme().TextMuted)
+		})
+	})
+}
+
 type preferences struct {
 	Appearance          mygo.ThemeSource             `json:"appearance"`
+	ThemeStyle          string                       `json:"themeStyle,omitempty"`
 	UIFont              string                       `json:"interfaceFont,omitempty"`
 	UIFontSize          string                       `json:"interfaceFontSize,omitempty"`
 	UIBold              bool                         `json:"interfaceFontBold,omitempty"`
@@ -23,14 +41,18 @@ type preferences struct {
 	Font                string                       `json:"terminalFont"`
 	Size                string                       `json:"terminalFontSize"`
 	SkipStartupTerminal bool                         `json:"skipStartupTerminal,omitempty"`
+	SelectedConnection  string                       `json:"selectedConnection,omitempty"`
 	Shortcuts           [len(shortcutActions)]string `json:"shortcuts"`
+	AgentArguments      [len(agentLaunchers)]string  `json:"agentArguments,omitzero"`
 	QuickCommands       []quickCommand               `json:"quickCommands,omitempty"`
+	SFTPFavorites       map[string][]sftpFavorite    `json:"sftpFavorites,omitempty"`
 }
 
 const (
 	settingsAppearanceTab = iota
 	settingsShortcutsTab
-	settingsHostsTab
+	settingsAgentsTab
+	settingsThemeTab
 )
 
 const systemUIFont = "System Default"
@@ -51,6 +73,7 @@ var terminalSizes = []string{"11", "12", "13", "14", "15", "16", "18", "20", "24
 
 func (p preferences) withDefaults() preferences {
 	p.Appearance = normalizeAppearance(p.Appearance)
+	p.ThemeStyle = appearanceStyle(p.ThemeStyle).id
 	if p.Language != "en" {
 		p.Language = "zh-Hans"
 	}
@@ -108,6 +131,7 @@ func (a *localTerm) saveSettings() {
 		return
 	}
 	next := a.settingsDraft.withDefaults()
+	next.SFTPFavorites = a.preferences.SFTPFavorites
 	for i, chord := range next.Shortcuts {
 		if chord != "—" && slices.Contains(next.Shortcuts[:i], chord) {
 			a.settingsTab, a.settingsSearch = settingsShortcutsTab, ""
@@ -115,15 +139,18 @@ func (a *localTerm) saveSettings() {
 			return
 		}
 	}
+	for i, args := range next.AgentArguments {
+		if args != "" && !validQuickCommand(args) {
+			a.settingsTab, a.settingsSearch = settingsAgentsTab, ""
+			a.settingsError = agentLaunchers[i].name + a.tr(" 的启动参数必须为单行。", " launch arguments must be on one line.")
+			return
+		}
+	}
 	if err := saveJSON(a.settingsPath, next); err != nil {
 		a.settingsError = a.tr("无法保存设置：", "Could not save settings: ") + err.Error()
 		return
 	}
-	appearanceChanged := normalizeAppearance(a.preferences.Appearance) != next.Appearance
 	a.preferences = next
-	if appearanceChanged && a.win != nil {
-		mygo.Theme.SetSource(next.Appearance)
-	}
 	a.settingsError = ""
 	a.closeSettings()
 	for _, s := range a.tabs {
@@ -134,6 +161,9 @@ func (a *localTerm) saveSettings() {
 }
 
 func (a *localTerm) closeSettings() {
+	if a.win != nil && a.settingsDraft.Appearance != normalizeAppearance(a.preferences.Appearance) {
+		mygo.Theme.SetSource(normalizeAppearance(a.preferences.Appearance))
+	}
 	a.settingsOpen = false
 	a.focusTab = a.active != nil
 }
@@ -147,30 +177,19 @@ func (a *localTerm) settingsView(c *ui.Context) {
 		title, icon, keywords string
 		draw                  func(*ui.Context)
 	}{
-		settingsAppearanceTab: {a.tr("外观", "Appearance"), "◐", "语言 启动 主题 配色 深色 浅色 字体 字号 加粗 终端 language launch theme color dark light font size bold terminal", a.settingsAppearance},
+		settingsAppearanceTab: {a.tr("外观", "Appearance"), "◐", "语言 启动 深色 浅色 字体 字号 加粗 终端 language launch dark light font size bold terminal", a.settingsAppearance},
 		settingsShortcutsTab:  {a.tr("快捷键", "Shortcuts"), "⌘", "按键 键盘 录入 keyboard keys binding", a.settingsShortcuts},
-		settingsHostsTab:      {a.tr("SSH 主机", "SSH hosts"), "↗", "连接 远程 remote connection", a.settingsHosts},
+		settingsAgentsTab:     {a.tr("Agent", "Agents"), "›", "codex claude 启动 参数 launch arguments", a.settingsAgents},
+		settingsThemeTab:      {a.tr("主题", "Theme"), "◈", "配色 海蓝 松林 color palette ocean forest", a.settingsTheme},
 	}
-	ui.Row(c).Fill().AlignItems(ui.Stretch).Background(a.consoleTheme.Background).Children(func() {
+	ui.Row(c).Fill().AlignItems(ui.Stretch).Children(func() {
 		query := strings.ToLower(strings.TrimSpace(a.settingsSearch))
 		matches := func(title, keywords string) bool {
 			return strings.Contains(strings.ToLower(title+" "+keywords), query)
 		}
 		firstMatch := -1
 		ui.Column(c).Width(192).Shrink(0).Padding(16, 12).Gap(6).Background(c.Theme().Background).Children(func() {
-			ui.Row(c).AlignItems(ui.Center).Gap(8).Margin(0, 0, 6).Children(func() {
-				ui.Text(c, a.tr("系统设置", "Settings")).FontSize(interfaceTextSize(c, 13)).Bold()
-				label := a.tr("返回", "Back")
-				button := ui.ButtonBase(c).Height(26).PaddingX(6).Gap(4).Center().Radius(5).
-					Label(label).OnClick(a.closeSettings)
-				if button.Hovered() {
-					button.Background(c.Theme().SurfaceHover)
-				}
-				button.Children(func() {
-					ui.Text(c, "←").FontSize(interfaceTextSize(c, 15)).TextColor(c.Theme().TextMuted)
-					ui.Text(c, label).FontSize(interfaceTextSize(c, 12)).TextColor(c.Theme().TextMuted)
-				})
-			})
+			ui.Text(c, a.tr("系统设置", "Settings")).FontSize(interfaceTextSize(c, 13)).Bold().Margin(0, 0, 6)
 			ui.TextInput(c, &a.settingsSearch).Label(a.tr("搜索设置", "Search settings")).
 				Placeholder(a.tr("搜索设置…", "Search settings…")).MinWidth(0).FillWidth()
 			ui.Box(c).Height(4)
@@ -206,7 +225,7 @@ func (a *localTerm) settingsView(c *ui.Context) {
 			}
 		})
 		ui.Box(c).Width(1).Shrink(0).Background(c.Theme().Border)
-		ui.Column(c).Grow(1).MinWidth(0).Children(func() {
+		ui.Column(c).Grow(1).MinWidth(0).Background(a.consoleTheme.Background).Children(func() {
 			ui.Row(c).Height(55).Shrink(0).PaddingX(24).AlignItems(ui.Center).Gap(12).Children(func() {
 				if firstMatch >= 0 {
 					page := pages[a.settingsTab]
@@ -227,13 +246,11 @@ func (a *localTerm) settingsView(c *ui.Context) {
 			if a.settingsError != "" {
 				ui.Text(c, a.settingsError).TextColor(c.Theme().Danger).Padding(6, 24)
 			}
-			if a.settingsTab != settingsHostsTab {
-				ui.Box(c).Height(1).Shrink(0).FillWidth().Background(c.Theme().Border)
-				ui.Row(c).Height(52).Shrink(0).PaddingX(24).AlignItems(ui.Center).Justify(ui.End).Gap(8).Children(func() {
-					ui.Button(c, a.tr("取消", "Cancel")).OnClick(a.closeSettings)
-					ui.PrimaryButton(c, a.tr("保存", "Save")).Disabled(a.recordingShortcut != 0).OnClick(a.saveSettings)
-				})
-			}
+			ui.Box(c).Height(1).Shrink(0).FillWidth().Background(c.Theme().Border)
+			ui.Row(c).Height(52).Shrink(0).PaddingX(24).AlignItems(ui.Center).Justify(ui.End).Gap(8).Children(func() {
+				ui.Button(c, a.tr("取消", "Cancel")).OnClick(a.closeSettings)
+				ui.PrimaryButton(c, a.tr("保存", "Save")).Disabled(a.recordingShortcut != 0).OnClick(a.saveSettings)
+			})
 		})
 	})
 }
@@ -263,7 +280,7 @@ func (a *localTerm) settingsAppearance(c *ui.Context) {
 	})
 	ui.Box(c).Height(1).FillWidth().Background(c.Theme().Border)
 	ui.Row(c).MinHeight(46).AlignItems(ui.Center).Gap(8).Children(func() {
-		ui.Text(c, a.tr("主题", "Theme"))
+		ui.Text(c, a.tr("明暗模式", "Color mode"))
 		ui.Spacer(c)
 		for _, option := range []struct {
 			source mygo.ThemeSource
@@ -275,7 +292,14 @@ func (a *localTerm) settingsAppearance(c *ui.Context) {
 		} {
 			selected := a.settingsDraft.Appearance == option.source
 			button := ui.Button(c.Key(option.source), option.label).Selected(selected).
-				OnClick(func() { a.settingsDraft.Appearance = option.source })
+				OnClick(func() {
+					if a.settingsDraft.Appearance != option.source {
+						a.settingsDraft.Appearance = option.source
+						if a.win != nil {
+							mygo.Theme.SetSource(option.source)
+						}
+					}
+				})
 			if selected {
 				button.Background(c.Theme().Selection).TextColor(c.Theme().Text)
 			}
@@ -307,36 +331,15 @@ func (a *localTerm) settingsAppearance(c *ui.Context) {
 		TextColor(a.consoleTheme.Foreground).Padding(8, 12).Background(a.consoleTheme.Background).Radius(5).FillWidth()
 }
 
-func (a *localTerm) settingsHosts(c *ui.Context) {
-	ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
-		ui.Text(c, a.tr("已保存的主机", "Saved hosts")).FontSize(interfaceTextSize(c, 15)).Bold()
-		ui.Spacer(c)
-		ui.PrimaryButton(c, a.tr("新增主机", "Add host")).Disabled(a.storeError != nil).OnClick(func() {
-			a.settingsOpen = false
-			a.editor = &editor{entry: entry{Kind: host}, add: true, open: true, fixedKind: true, fromSettings: true}
-		})
-	})
-	ui.Column(c).FillWidth().Children(func() {
-		hasHosts := false
-		for _, e := range a.entries {
-			if e.Kind != host {
-				continue
+func (a *localTerm) settingsTheme(c *ui.Context) {
+	ui.Row(c).MinHeight(42).AlignItems(ui.Center).Gap(8).Children(func() {
+		for _, style := range themeStyles {
+			selected := a.settingsDraft.ThemeStyle == style.id
+			button := ui.Button(c.Key(style.id), a.tr(style.chinese, style.english)).Selected(selected).
+				OnClick(func() { a.settingsDraft.ThemeStyle = style.id })
+			if selected {
+				button.Background(c.Theme().Selection).TextColor(c.Theme().Text)
 			}
-			hasHosts = true
-			key := c.Key(e.ID)
-			ui.Row(key).Padding(8, 0).Gap(10).AlignItems(ui.Center).Children(func() {
-				ui.Column(key).Grow(1).MinWidth(0).Gap(3).Children(func() {
-					ui.Text(key, e.Name).SingleLine().Bold()
-					ui.Text(key, e.Host).SingleLine().TextColor(c.Theme().TextMuted)
-				})
-				ui.Button(key, a.tr("编辑主机", "Edit host")).Tooltip(e.Name).OnClick(func() {
-					a.settingsOpen = false
-					a.editor = &editor{entry: e, open: true, fromSettings: true}
-				})
-			})
-		}
-		if !hasHosts {
-			ui.Text(c, a.tr("还没有 SSH 主机。", "No SSH hosts yet.")).TextColor(c.Theme().TextMuted)
 		}
 	})
 }

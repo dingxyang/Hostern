@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set version from tag
+        shell: bash
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Expected a stable release tag like v0.1.0"
+            exit 1
+          fi
+          jq --arg version "${GITHUB_REF_NAME#v}" '.version = $version' mygo.json > mygo.release.json
+          mv mygo.release.json mygo.json
+
+      - uses: jdx/mise-action@v5
+        with:
+          cache: false
+
+      - name: Verify
+        run: |
+          mise run test
+          mise run vet
+
+      - name: Build and sign update archives
+        env:
+          MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$MYGO_UPDATER_PRIVATE_KEY" ]]; then
+            echo "::error::Missing MYGO_UPDATER_PRIVATE_KEY"
+            exit 1
+          fi
+          mise run build -- -platform darwin/arm64,darwin/amd64
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          version="${tag#v}"
+          assets=()
+          shopt -s nullglob
+          for arch in arm64 amd64; do
+            platform="darwin-$arch"
+            assets+=(
+              "dist/$platform/Hostern $version $arch.dmg"
+              "dist/$platform/hostern-$version-$platform.tar.gz"
+              "dist/$platform/update-$platform.json"
+              "dist/$platform/"*.delta
+            )
+          done
+          for asset in "${assets[@]}"; do
+            test -s "$asset"
+          done
+
+          if draft=$(gh release view "$tag" --json isDraft --jq .isDraft); then
+            if [[ "$draft" == false ]]; then
+              echo "Release $tag is already published."
+              exit 0
+            fi
+          else
+            gh release create "$tag" --verify-tag --draft --generate-notes
+          fi
+          gh release upload "$tag" "${assets[@]}" --clobber
+          gh release edit "$tag" --draft=false

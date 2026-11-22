@@ -12,6 +12,10 @@ func (a *localTerm) tabMenu(m *ui.Menu, s *session) {
 	if index < 0 {
 		return
 	}
+	if m.Item(a.tr("重命名页签…", "Rename Tab…")).Chosen() {
+		a.openTabTitle(s)
+		return
+	}
 	pinLabel := a.tr("固定页签", "Pin Tab")
 	if s.pinned {
 		pinLabel = a.tr("取消固定页签", "Unpin Tab")
@@ -27,6 +31,10 @@ func (a *localTerm) tabMenu(m *ui.Menu, s *session) {
 		if a.active == s {
 			a.focusTab = true
 		}
+		return
+	}
+	if m.Item(a.tr("设置页签颜色…", "Set Tab Color…")).Chosen() {
+		a.tabColorPicker = &tabColorPicker{session: s, open: true}
 		return
 	}
 	m.Separator()
@@ -62,10 +70,64 @@ func (a *localTerm) closeSideMenuItem(m *ui.Menu, label string, anchor *session,
 	return true
 }
 
+type tabColorPicker struct {
+	session *session
+	open    bool
+}
+
+func (a *localTerm) tabColorView(c *ui.Context, picker *tabColorPicker) {
+	c = c.Key(picker)
+	ui.Modal(c, &picker.open, func() {
+		ui.Column(c).Width(260).Gap(4).Children(func() {
+			ui.Text(c, a.tr("设置页签颜色", "Set Tab Color")).Bold().Margin(0, 0, 8)
+			for _, option := range []struct {
+				chinese, english string
+				color            ui.Color
+			}{
+				{"默认", "Default", ui.Transparent},
+				{"红色", "Red", ui.Hex("#D35C69")},
+				{"橙色", "Orange", ui.Hex("#CF873B")},
+				{"绿色", "Green", ui.Hex("#579B68")},
+				{"青色", "Teal", ui.Hex("#429D9E")},
+				{"蓝色", "Blue", ui.Hex("#588BD4")},
+				{"紫色", "Purple", ui.Hex("#9674D1")},
+			} {
+				label := a.tr(option.chinese, option.english)
+				selected := picker.session.tabColor == option.color
+				button := ui.ButtonBase(c).FillWidth().Height(30).PaddingX(8).Gap(8).
+					AlignItems(ui.Center).Label(label).Selected(selected).Background(ui.Transparent).
+					OnClick(func() {
+						picker.session.tabColor = option.color
+						picker.open = false
+					})
+				if button.Hovered() {
+					button.Background(c.Theme().SurfaceHover)
+				}
+				button.Children(func() {
+					swatch := ui.Box(c).Size(14, 14).Radius(3).Background(option.color)
+					if option.color == ui.Transparent {
+						swatch.Border(1, c.Theme().TextMuted)
+					}
+					ui.Text(c, label)
+					if selected {
+						ui.Spacer(c)
+						ui.Text(c, "✓")
+					}
+				})
+			}
+			ui.Button(c, a.tr("取消", "Cancel")).OnClick(func() { picker.open = false })
+		})
+	})
+}
+
 type tabTitleForm struct {
 	session *session
 	title   string
 	open    bool
+}
+
+func (a *localTerm) openTabTitle(s *session) {
+	a.tabTitle = &tabTitleForm{session: s, title: s.name, open: true}
 }
 
 func (a *localTerm) terminalMenu(services ui.Services, m *ui.Menu, s *session, selection string) {
@@ -78,7 +140,7 @@ func (a *localTerm) terminalMenu(services ui.Services, m *ui.Menu, s *session, s
 	}
 	m.Separator()
 	if m.Item(a.tr("设置页签标题…", "Set Tab Title…")).Chosen() {
-		a.tabTitle = &tabTitleForm{session: s, title: s.name, open: true}
+		a.openTabTitle(s)
 	}
 	if m.Item(a.tr("关闭当前页签", "Close Current Tab")).Chosen() {
 		a.closeTab(s)
@@ -87,7 +149,7 @@ func (a *localTerm) terminalMenu(services ui.Services, m *ui.Menu, s *session, s
 
 func (a *localTerm) tabTitleView(c *ui.Context, form *tabTitleForm) {
 	c = c.Key(form)
-	title := a.tr("设置页签标题", "Set Tab Title")
+	title := a.tr("重命名页签", "Rename Tab")
 	ui.Modal(c, &form.open, func() {
 		ui.Column(c).Width(340).Gap(12).Children(func() {
 			ui.Text(c, title).FontSize(interfaceTextSize(c, 20)).Bold()

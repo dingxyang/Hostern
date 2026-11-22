@@ -86,9 +86,44 @@ func TestConnectionTreeDrag(t *testing.T) {
 	if !slices.Equal(saved, app.entries) || saved[len(saved)-1].ID != "second" || saved[len(saved)-1].Parent != "" {
 		t.Fatalf("expected the host at the end of the root: %+v", saved)
 	}
+	if len(app.tabs) != 0 {
+		t.Fatal("repeated drag attempts opened a terminal")
+	}
+
+	outer := find("Outer group")
+	x, y := outer.X+outer.W/2, outer.Y+outer.H/2
+	view.Press(x, y)
+	view.Release(x, y)
+	view.Press(x, y)
+	if !*app.expansion("outer") {
+		t.Fatal("the second press collapsed the group before release")
+	}
+	view.Release(x, y)
+	if *app.expansion("outer") {
+		t.Fatal("a completed double-click did not collapse the group")
+	}
 }
 
 func TestConnectionTreeUI(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.Mkdir(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, contents := range map[string]string{
+		"work key": "-----BEGIN OPENSSH PRIVATE KEY-----\n",
+		"legacy":   "-----BEGIN ENCRYPTED PRIVATE KEY-----\r\n",
+		"work.pub": "ssh-ed25519 example\n",
+		"config":   "Host dev\n",
+	} {
+		if err := os.WriteFile(filepath.Join(sshDir, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if names := sshIdentityNames(); !slices.Equal(names, []string{"legacy", "work key"}) {
+		t.Fatalf("detected SSH identities = %q", names)
+	}
 	path := filepath.Join(t.TempDir(), "connections.json")
 	app := &localTerm{storePath: path, sidebar: 270, expanded: make(map[string]*bool)}
 	view := ui.NewTester(app.view, 1080, 650)
@@ -109,6 +144,10 @@ func TestConnectionTreeUI(t *testing.T) {
 		view.Key(0, ui.KeyTab)
 	}
 	view.Type("tmux attach")
+	click(t, view, "从 ~/.ssh 选择")
+	if err := view.ChooseMenuItem("work key"); err != nil {
+		t.Fatal(err)
+	}
 	click(t, view, "保存")
 	if len(app.entries) != 2 || app.entries[1].Parent != group.ID || app.entries[1].Host != "dev" {
 		t.Fatalf("host was not added under category: %+v, form = %+v, visible = %v", app.entries, app.editor, view.Texts())
@@ -121,7 +160,7 @@ func TestConnectionTreeUI(t *testing.T) {
 	view.Type("内网主机")
 	click(t, view, "保存")
 	saved, err := loadEntries(path)
-	if err != nil || len(saved) != 2 || saved[1].Name != "内网主机" || saved[1].StartupCommand != "tmux attach" || saved[1].Parent != group.ID {
+	if err != nil || len(saved) != 2 || saved[1].Name != "内网主机" || saved[1].StartupCommand != "tmux attach" || saved[1].IdentityFile != "~/.ssh/work key" || saved[1].Parent != group.ID {
 		t.Fatalf("edited tree did not persist: %+v, %v", saved, err)
 	}
 	click(t, view, "＋ 新建")
@@ -180,6 +219,11 @@ func TestSSHCommand(t *testing.T) {
 	if got := remote.sshCommand(); !slices.Equal(got, append(want, remote.StartupCommand)) {
 		t.Fatalf("SSH argv did not preserve the remote shell command: %q", got)
 	}
+	remote.IdentityFile = "~/.ssh/work key"
+	want = []string{"/usr/bin/ssh", "-tt", "-l", "ops", "-p", "2222", "-i", remote.IdentityFile, "--", "::1", remote.StartupCommand}
+	if got := remote.sshCommand(); !slices.Equal(got, want) {
+		t.Fatalf("SSH argv with an identity = %q, want %q", got, want)
+	}
 	invalid := remote
 	invalid.StartupCommand = "pwd\x00"
 	if _, err := invalid.validated(); err == nil {
@@ -190,6 +234,20 @@ func TestSSHCommand(t *testing.T) {
 		if _, err := remote.validated(); err == nil {
 			t.Errorf("accepted invalid destination %q", dest)
 		}
+	}
+}
+
+func TestSFTPCommand(t *testing.T) {
+	remote, err := (entry{
+		Kind: host, Name: "SFTP test", Host: "[fe80::1%en0]", User: "ops@example", Port: "02222",
+		IdentityFile: "~/keys/test key", StartupCommand: "exit 7",
+	}).validated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"-l", "ops@example", "-p", "2222", "-i", "~/keys/test key", "--", "fe80::1%en0"}
+	if got := remote.sftpMasterCommand("/tmp/control"); !slices.Equal(got[len(got)-len(want):], want) {
+		t.Fatalf("SFTP master argv = %q, want connection arguments %q", got, want)
 	}
 }
 
@@ -346,29 +404,17 @@ func TestSettingsUI(t *testing.T) {
 	if after, ok := view.Find("Font size sample"); !ok || after.W <= before.W {
 		t.Fatalf("tab text did not grow after saving the interface font: before=%v after=%v", before, after)
 	}
-	if !view.HasText("Connections") {
+	if _, ok := view.Find("Search connections"); !ok {
 		t.Fatal("sidebar did not switch to English")
 	}
 	click(t, view, "Settings")
-	click(t, view, "SSH hosts")
-	click(t, view, "Add host")
-	view.Type("Dev box")
-	view.Key(0, ui.KeyTab)
-	view.Type("dev")
-	click(t, view, "Save")
-	if len(app.entries) != 1 || app.entries[0].Kind != host || app.entries[0].Host != "dev" {
-		t.Fatalf("unexpected settings host: %+v", app.entries)
+	if _, ok := view.Find("SSH hosts"); ok {
+		t.Fatal("SSH hosts should be managed from the connection tree")
 	}
-	if !app.settingsOpen || !view.HasText("Saved hosts") {
-		t.Fatal("did not return to the hosts page")
-	}
-	click(t, view, "Edit host")
-	view.Key(ui.Super, ui.KeyA)
-	view.Type("Build box")
-	click(t, view, "Save")
-	entries, err := loadEntries(app.storePath)
-	if err != nil || len(entries) != 1 || entries[0].Name != "Build box" || entries[0].Host != "dev" {
-		t.Fatalf("edited host = %+v, err = %v", entries, err)
+	click(t, view, "Search settings")
+	view.Type("SSH")
+	if !view.HasText("No matching settings.") {
+		t.Fatal("SSH hosts should not appear in settings search")
 	}
 }
 
@@ -378,11 +424,26 @@ func TestStartupTerminalAndSidebarMenu(t *testing.T) {
 	}
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("SHELL", "/bin/sh")
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOSTERN_TEST_STARTUP_DIRECTORY", dir)
+	entries := []entry{{ID: "work", Kind: local, Name: "Work", Path: dir, StartupCommand: "exit 42"}}
+	settingsPath := filepath.Join(t.TempDir(), "settings.json")
+	beforeRestart := &localTerm{sidebar: 270, entries: entries, settingsPath: settingsPath}
+	click(t, ui.NewTester(beforeRestart.view, 720, 530), "Work")
+	prefs, err := loadPreferences(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	updates := make(chan func(), 1)
 	app := &localTerm{
 		sidebar: 270, openOnStart: true,
+		preferences: prefs, entries: entries,
 		update: func(fn func()) { updates <- fn },
 	}
+	app.restoreConnectionSelection()
 	t.Cleanup(app.closeSessions)
 	view := ui.NewTester(app.view, 720, 530)
 	finishLaunch := func() {
@@ -396,13 +457,26 @@ func TestStartupTerminalAndSidebarMenu(t *testing.T) {
 		}
 	}
 	first := app.active
-	if first == nil || first.kind != local || len(app.tabs) != 1 || first.term != nil {
-		t.Fatal("startup should show one pending local terminal")
+	if first == nil || first.entryID != "work" || len(app.tabs) != 1 || first.term != nil {
+		t.Fatal("startup should show one pending terminal for the restored local directory")
 	}
 	finishLaunch()
 	if app.active != first || first.term == nil {
 		t.Fatal("startup should attach the terminal to its pending tab")
 	}
+	checkDirectory := func(tab *session) {
+		t.Helper()
+		tab.term.Send([]byte("[ \"$(pwd -P)\" = \"$HOSTERN_TEST_STARTUP_DIRECTORY\" ]; exit $?\n"))
+		select {
+		case <-tab.term.Done():
+		case <-time.After(5 * time.Second):
+			t.Fatal("local shell did not exit")
+		}
+		if tab.term.ExitCode() != 0 {
+			t.Fatalf("local shell exit = %d, output = %q", tab.term.ExitCode(), tab.term.Snapshot())
+		}
+	}
+	checkDirectory(first)
 	view.RightClickAt(140, 200)
 	if err := view.ChooseMenuItem("打开本地终端"); err != nil {
 		t.Fatal(err)
@@ -412,6 +486,7 @@ func TestStartupTerminalAndSidebarMenu(t *testing.T) {
 	if len(app.tabs) != 2 || active == first || app.active != active || active.term == nil {
 		t.Fatal("sidebar menu should open a separate local terminal")
 	}
+	checkDirectory(active)
 	view.RightClickAt(140, 200)
 	if err := view.ChooseMenuItem("隐藏侧栏"); err != nil {
 		t.Fatal(err)
@@ -431,6 +506,21 @@ func TestStartupTerminalAndSidebarMenu(t *testing.T) {
 	if len(app.tabs) != 2 || app.active != active {
 		t.Fatal("toggling the sidebar should preserve the sessions and active tab")
 	}
+	click(t, view, "新建终端")
+	if err := view.ChooseMenuItem("本地终端"); err != nil {
+		t.Fatal(err)
+	}
+	finishLaunch()
+	if len(app.tabs) != 3 {
+		t.Fatal("tab bar menu should open a separate local terminal")
+	}
+	checkDirectory(app.active)
+	view.Key(ui.Super, ui.KeyT)
+	finishLaunch()
+	if len(app.tabs) != 4 {
+		t.Fatal("shortcut should open a separate local terminal")
+	}
+	checkDirectory(app.active)
 }
 
 func TestTypedCreationMenus(t *testing.T) {
@@ -721,24 +811,41 @@ func TestTabContextMenu(t *testing.T) {
 		projectView: true, projectID: "project", sidebarHidden: true,
 	}
 	view := ui.NewTester(app.view, 800, 530)
-	choose := func(tab, action string) {
+	choose := func(tab string, action ...string) {
 		t.Helper()
 		if err := view.RightClick(tab); err != nil {
 			t.Fatal(err)
 		}
-		if err := view.ChooseMenuItem(action); err != nil {
+		if err := view.ChooseMenuItem(action...); err != nil {
 			t.Fatal(err)
 		}
+	}
+	choose("Anchor", "设置页签颜色…")
+	click(t, view, "蓝色")
+	if anchor.tabColor != ui.Hex("#588BD4") || left.tabColor != ui.Transparent || app.active != left {
+		t.Fatal("setting a tab color should affect only the clicked tab")
+	}
+	choose("Anchor", "设置页签颜色…")
+	click(t, view, "默认")
+	if anchor.tabColor != ui.Transparent {
+		t.Fatal("choosing the default color should clear the tab color")
+	}
+	choose("Anchor", "重命名页签…")
+	view.Key(ui.Super, ui.KeyA)
+	view.Type("  Renamed  ")
+	click(t, view, "保存")
+	if anchor.name != "Renamed" || !view.HasText("Renamed") || app.active != left {
+		t.Fatal("renaming should update only the clicked tab and preserve the active tab")
 	}
 	choose("Pinned", "固定页签")
 	if !pinned.pinned || app.tabs[0] != pinned || app.active != left {
 		t.Fatal("pinning should move the tab to the front and preserve the active tab")
 	}
-	choose("Anchor", "关闭左侧页签")
+	choose("Renamed", "关闭左侧页签")
 	if !slices.Equal(app.tabs, []*session{pinned, anchor, hidden, right}) || app.active != anchor {
 		t.Fatal("closing tabs to the left should keep the pinned tab and activate the anchor")
 	}
-	choose("Anchor", "关闭右侧页签")
+	choose("Renamed", "关闭右侧页签")
 	if !slices.Equal(app.tabs, []*session{pinned, anchor, hidden}) {
 		t.Fatal("closing tabs to the right should preserve tabs from other projects")
 	}
@@ -756,6 +863,87 @@ func TestTabContextMenu(t *testing.T) {
 	}
 }
 
+func TestNewTerminalButtonPlacement(t *testing.T) {
+	first := &session{name: "First shell"}
+	app := &localTerm{tabs: []*session{first}, active: first, sidebarHidden: true}
+	const width = 400
+	view := ui.NewTester(app.view, width, 240)
+	tab, tabFound := view.Find(first.name)
+	add, addFound := view.Find("新建终端")
+	if gap := add.X - (tab.X + tab.W); !tabFound || !addFound || gap < 0 || gap > 36 {
+		t.Fatalf("new terminal button should follow the last tab: tab=%+v, add=%+v", tab, add)
+	}
+
+	for i := range 12 {
+		app.tabs = append(app.tabs, &session{name: fmt.Sprintf("Terminal session %d", i+1)})
+	}
+	view.Frame()
+	add, addFound = view.Find("新建终端")
+	if !addFound || add.X+add.W > width || add.W < 24 {
+		t.Fatalf("new terminal button should stay visible when tabs overflow: %+v", add)
+	}
+}
+
+func TestNewAgentTerminal(t *testing.T) {
+	if os.Getenv("MYGO_GHOSTTY_VT") == "" {
+		t.Skip("set MYGO_GHOSTTY_VT to run the PTY test")
+	}
+	t.Setenv("SHELL", "/bin/sh")
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(`#!/bin/sh
+[ "$(pwd -P)" = "$HOSTERN_TEST_AGENT_DIRECTORY" ] || exit 1
+printf '%s|%s\n' "$1" "$2"
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("HOSTERN_TEST_AGENT_DIRECTORY", dir)
+	app := &localTerm{
+		projectView: true, projectID: "work",
+		entries:      []entry{{ID: "work", Name: "Work", Kind: local, Path: dir}},
+		settingsPath: filepath.Join(t.TempDir(), "settings.json"),
+	}
+	t.Cleanup(app.closeSessions)
+	view := ui.NewTester(app.view, 720, 530)
+	click(t, view, "新建终端")
+	if err := view.ChooseMenuItem("Claude Code"); err == nil {
+		t.Fatal("Claude Code should be disabled when its executable is missing")
+	}
+	if err := view.ChooseMenuItem("配置 Agent 启动参数…"); err != nil {
+		t.Fatal(err)
+	}
+	if !app.settingsOpen || app.settingsTab != settingsAgentsTab {
+		t.Fatal("agent settings did not open")
+	}
+	click(t, view, "Codex 启动参数")
+	view.Type(`--test "two words"`)
+	click(t, view, "保存")
+	saved, err := loadPreferences(app.settingsPath)
+	if err != nil || saved.AgentArguments[0] != `--test "two words"` {
+		t.Fatalf("saved Codex arguments = %q, err = %v", saved.AgentArguments[0], err)
+	}
+	click(t, view, "新建终端")
+	if err := view.ChooseMenuItem("Codex"); err != nil {
+		t.Fatal(err)
+	}
+	tab := app.active
+	if tab == nil || tab.term == nil || tab.name != "Codex" || tab.entryID != "work" {
+		t.Fatal("expected a Codex terminal in the current project")
+	}
+	select {
+	case <-tab.term.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("test agent did not exit")
+	}
+	if output := tab.term.Snapshot(); tab.term.ExitCode() != 0 || !bytes.Contains(output, []byte("--test|two words")) {
+		t.Fatalf("Codex launch exit = %d, output = %q", tab.term.ExitCode(), output)
+	}
+}
+
 func TestThemedTabStates(t *testing.T) {
 	first, second := &session{name: "First"}, &session{name: "Second"}
 	app := &localTerm{tabs: []*session{first, second}, active: first}
@@ -765,7 +953,10 @@ func TestThemedTabStates(t *testing.T) {
 			app.tabHeader(c.Key(first), first)
 			app.tabHeader(c.Key(second), second)
 		})
-	}, 320, 80)
+		if picker := app.tabColorPicker; picker != nil && picker.open {
+			app.tabColorView(c, picker)
+		}
+	}, 400, 380)
 	view.SetDark(true)
 	countColor := func(want ui.Color) int {
 		img := view.Image()
@@ -779,16 +970,43 @@ func TestThemedTabStates(t *testing.T) {
 		}
 		return count
 	}
-	if pixels := countColor(darkPalette.chrome.Focus); pixels == 0 {
+	if countColor(darkPalette.chrome.Border) != 2*(terminalTabContentHeight-14) {
+		t.Error("expected one short vertical divider per tab")
+	}
+	indicator := darkPalette.chrome.Focus
+	if pixels := countColor(indicator); pixels == 0 {
 		t.Error("selected tab underline was not rendered")
+	}
+	if countColor(darkPalette.chrome.Border.Mix(darkPalette.chrome.TextMuted, 0.35)) != 0 {
+		t.Error("selected tab rendered a card outline")
 	}
 	r, ok := view.Find("Second")
 	if !ok {
 		t.Fatal("inactive tab was not rendered")
 	}
+	textPixels := countColor(darkPalette.chrome.Text)
 	view.Move(r.X+r.W/2, r.Y+r.H/2)
-	if countColor(darkPalette.chrome.SurfaceHover) == 0 {
-		t.Error("hovered tab background was not rendered")
+	if countColor(darkPalette.chrome.Text) <= textPixels {
+		t.Error("hovered tab title was not brightened")
+	}
+	if countColor(darkPalette.chrome.SurfaceHover) != 0 {
+		t.Error("hovered tab should not render a filled background")
+	}
+
+	if err := view.RightClick("Second"); err != nil {
+		t.Fatal(err)
+	}
+	if err := view.ChooseMenuItem("设置页签颜色…"); err != nil {
+		t.Fatal(err)
+	}
+	for _, hex := range []string{"#D35C69", "#CF873B", "#579B68", "#429D9E", "#588BD4", "#9674D1"} {
+		if countColor(ui.Hex(hex)) < 100 {
+			t.Errorf("swatch %s was not rendered in the color picker", hex)
+		}
+	}
+	click(t, view, "蓝色")
+	if countColor(ui.Hex("#588BD4")) != 24 {
+		t.Error("custom underline color was not rendered on the inactive tab")
 	}
 
 	before := countColor(darkPalette.chrome.Focus)
@@ -820,8 +1038,13 @@ func TestProjectViewUI(t *testing.T) {
 			t.Errorf("%q visible = %v, want %v", label, found, want)
 		}
 	}
+	divider, dividerFound := view.Find("Divider")
+	firstTab, firstTabFound := view.Find("General shell")
+	if !dividerFound || !firstTabFound || firstTab.X != divider.X+divider.W {
+		t.Fatalf("terminal tabs must start at the content edge: divider=%+v, tab=%+v", divider, firstTab)
+	}
 	click(t, view, "项目视图")
-	visible("连接", false)
+	visible("搜索连接", false)
 	visible("First directory", true)
 	visible("First shell", true)
 	visible("Second shell", false)
@@ -829,8 +1052,8 @@ func TestProjectViewUI(t *testing.T) {
 
 	railTab, railFound := view.Find("终端")
 	shellTab, shellFound := view.Find("First shell")
-	if !railFound || !shellFound || railTab.Y < 32 || railTab.Y > 44 || shellTab.Y < 32 || shellTab.Y > 40 {
-		t.Fatalf("project rail and terminal tabs must start below the header: rail=%+v, terminal=%+v", railTab, shellTab)
+	if !railFound || !shellFound || railTab.Y < 32 || railTab.Y > 44 || shellTab.Y < 0 || shellTab.Y+shellTab.H > 32 {
+		t.Fatalf("project rail must start below the header and terminal tabs must fit inside it: rail=%+v, terminal=%+v", railTab, shellTab)
 	}
 	img := view.Image()
 	border := lightPalette.chrome.Border
@@ -841,7 +1064,6 @@ func TestProjectViewUI(t *testing.T) {
 	}{
 		{"window header", 400, 32},
 		{"project rail", 54, 500},
-		{"terminal tabs", 400, 69},
 	} {
 		if got := img.RGBAAt(divider.x, divider.y); got != wantBorder {
 			t.Errorf("%s divider has color %v, want %v", divider.name, got, wantBorder)
@@ -939,8 +1161,42 @@ func TestProjectViewUI(t *testing.T) {
 	if err != nil || len(entries) != 3 || entries[2].Name != "Server" || entries[2].ProjectTitle != "Deploy" || entries[2].ProjectIcon != "🚀" {
 		t.Fatalf("project appearance was not saved separately from the connection name: %+v, %v", entries, err)
 	}
+	click(t, view, "First directory")
+	if err := view.RightClick("First directory"); err != nil {
+		t.Fatal(err)
+	}
+	if err := view.ChooseMenuItem("关闭项目页签"); err != nil {
+		t.Fatal(err)
+	}
+	visible("First directory", false)
+	visible("First shell", true)
+	if app.projectID != "" || app.active != first {
+		t.Fatal("closing the project tab should keep its session active under Terminals")
+	}
+	entries, err = loadEntries(app.storePath)
+	if err != nil || len(entries) != 3 || entries[0].ID != "first" || entries[0].isProject() {
+		t.Fatalf("closing the project tab should persist visibility and keep the directory: %+v, %v", entries, err)
+	}
+	click(t, view, "添加项目")
+	if err := view.ChooseMenuItem("恢复本地工作目录", "First directory · "); err != nil {
+		t.Fatal(err)
+	}
+	visible("First directory", true)
+	if app.projectID != "first" || app.active != first || len(app.tabs) != 3 {
+		t.Fatal("restoring the project tab should reuse its existing session")
+	}
 	click(t, view, "项目视图")
-	visible("连接", true)
+	visible("搜索连接", true)
+	click(t, view, "搜索连接")
+	view.Type("EXAMPLE.TEST")
+	visible("Server", true)
+	visible("First directory", false)
+	visible("没有匹配的连接", false)
+	view.Type("z")
+	visible("Server", false)
+	visible("没有匹配的连接", true)
+	view.Key(0, ui.KeyBackspace)
+	visible("Server", true)
 	visible("General shell", true)
 	visible("First shell", true)
 	visible("Remote shell", true)
@@ -971,8 +1227,8 @@ func TestProjectRailScrollKeepsSettingsVisible(t *testing.T) {
 	}
 	title, titleFound := view.Find("系统设置")
 	back, backFound := view.Find("返回")
-	if !titleFound || !backFound || back.X < title.X+title.W || back.X+back.W > 192 {
-		t.Fatalf("back button must sit next to the settings title: title=%+v, back=%+v", title, back)
+	if !titleFound || !backFound || back.Y < 0 || back.Y+back.H > 32 || title.Y <= 32 {
+		t.Fatalf("back button must sit in the header above the settings title: title=%+v, back=%+v", title, back)
 	}
 	click(t, view, "返回")
 	if app.settingsOpen || !app.projectView {

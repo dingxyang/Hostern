@@ -3,6 +3,7 @@ package main
 import (
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/dingxyang/localterm/internal/terminal"
 	"github.com/egoist/mygo/ui"
@@ -20,21 +21,14 @@ func (a *localTerm) view(c *ui.Context) {
 		c.Toast(message)
 	}
 	a.terminalErrors = nil
-	if a.editor != nil && !a.editor.open && a.editor.fromSettings {
-		a.editor = nil
-		a.settingsOpen = true
-	}
 	a.handleShortcuts(c)
 	ui.Column(c).Fill().Children(func() {
 		if a.settingsOpen {
-			bar := c.TitleBar()
-			ui.Row(c).Height(max(bar.Height, 28)).Shrink(0).Background(c.Theme().Background).DragWindow()
+			a.settingsToolbar(c)
 		} else {
 			a.windowToolbar(c)
-			if a.projectView {
-				ui.Box(c).Height(1).FillWidth().Shrink(0).Background(c.Theme().Border)
-			}
 		}
+		ui.Box(c).Height(1).FillWidth().Shrink(0).Background(c.Theme().Border)
 		ui.Box(c).Grow(1).MinHeight(0).Children(func() {
 			if a.settingsOpen {
 				a.settingsView(c)
@@ -53,6 +47,9 @@ func (a *localTerm) view(c *ui.Context) {
 	if a.confirm {
 		a.confirmDelete(c)
 	}
+	if picker := a.tabColorPicker; picker != nil && picker.open {
+		a.tabColorView(c, picker)
+	}
 	if form := a.tabTitle; form != nil && form.open {
 		a.tabTitleView(c, form)
 	}
@@ -67,9 +64,17 @@ func (a *localTerm) windowToolbar(c *ui.Context) {
 	if a.sidebarHidden || a.projectView {
 		label = a.tr("显示侧栏", "Show sidebar")
 	}
+	const controlWidth = 30
+	const projectButtonMargin = 4
+	const leftPadding = 8
+	controlsEnd := bar.Left + leftPadding + 2*controlWidth + 2*projectButtonMargin
+	tabStart := controlsEnd
+	if !a.projectView && !a.sidebarHidden {
+		tabStart = max(tabStart, a.sidebar+1)
+	}
 	ui.Row(c).Height(max(bar.Height, 32)).Shrink(0).AlignItems(ui.Center).
-		Padding(0, bar.Right+8, 0, bar.Left+8).Background(c.Theme().Background).DragWindow().Children(func() {
-		button := ui.ButtonBase(c).Size(30, 26).Radius(5).Label(label).Tooltip(label).OnClick(a.toggleSidebar)
+		Padding(0, bar.Right+8, 0, bar.Left+leftPadding).Background(c.Theme().Background).DragWindow().Children(func() {
+		button := ui.ButtonBase(c).Size(controlWidth, 26).Shrink(0).Radius(5).Label(label).Tooltip(label).OnClick(a.toggleSidebar)
 		if button.Hovered() {
 			button.Background(c.Theme().SurfaceHover)
 		}
@@ -82,7 +87,7 @@ func (a *localTerm) windowToolbar(c *ui.Context) {
 		})
 		modeLabel := a.tr("项目视图", "Project view")
 		theme := c.Theme()
-		mode := ui.ButtonBase(c).Size(30, 26).Margin(0, 4).Radius(5).Center().
+		mode := ui.ButtonBase(c).Size(controlWidth, 26).Margin(0, projectButtonMargin).Shrink(0).Radius(5).Center().
 			Label(modeLabel).Tooltip(modeLabel).Selected(a.projectView).Background(ui.Transparent).OnClick(a.toggleProjects)
 		iconColor := theme.TextMuted
 		if a.projectView {
@@ -99,6 +104,10 @@ func (a *localTerm) windowToolbar(c *ui.Context) {
 				p.Stroke(ui.Rect{X: r.X + 7, Y: r.Y + 1, W: 10, H: 14}, iconColor, 2, 1.3)
 			})
 		})
+		if tabStart > controlsEnd {
+			ui.Box(c).Width(tabStart - controlsEnd).Shrink(0)
+		}
+		a.terminalTabs(c)
 	})
 }
 
@@ -115,8 +124,9 @@ func (a *localTerm) connections(c *ui.Context) {
 		}
 	}).Children(func() {
 		ui.Row(c).Height(44).Shrink(0).PaddingX(12).AlignItems(ui.Center).Gap(8).Children(func() {
-			ui.Text(c, a.tr("连接", "Connections")).FontSize(interfaceTextSize(c, 13)).Bold().SingleLine().MinWidth(0)
-			ui.Spacer(c)
+			label := a.tr("搜索连接", "Search connections")
+			ui.TextInput(c, &a.connectionSearch).Label(label).Placeholder(label).
+				Grow(1).MinWidth(0).Disabled(disabled)
 			iconButton(c, "＋", a.tr("＋ 新建", "＋ New")).Disabled(disabled).OnClick(a.addEntry)
 		})
 		if disabled {
@@ -128,8 +138,11 @@ func (a *localTerm) connections(c *ui.Context) {
 			var drop connectionDrop
 			scroll.Children(func() {
 				children := make(map[string][]entry)
-				for _, e := range a.entries {
+				for _, e := range a.filteredConnections() {
 					children[e.Parent] = append(children[e.Parent], e)
+				}
+				if len(children[""]) == 0 && strings.TrimSpace(a.connectionSearch) != "" {
+					ui.Text(c, a.tr("没有匹配的连接", "No matching connections")).TextColor(c.Theme().TextMuted).Margin(6)
 				}
 				ui.Tree(c, func() { a.treeItems(c, children, "", &drop) })
 			})
@@ -146,6 +159,28 @@ func (a *localTerm) connections(c *ui.Context) {
 			iconButton(c, "⚙", a.tr("设置", "Settings")).Size(30, 30).OnClick(a.openSettings)
 		})
 	})
+}
+
+func (a *localTerm) filteredConnections() []entry {
+	query := strings.ToLower(strings.TrimSpace(a.connectionSearch))
+	if query == "" {
+		return a.entries
+	}
+	included := make(map[string]bool)
+	for _, e := range a.entries {
+		if strings.Contains(strings.ToLower(e.Name+" "+e.Host+" "+e.Path), query) {
+			for id := e.ID; id != "" && !included[id]; id = a.entryByID(id).Parent {
+				included[id] = true
+			}
+		}
+	}
+	var matches []entry
+	for _, e := range a.entries {
+		if included[e.ID] {
+			matches = append(matches, e)
+		}
+	}
+	return matches
 }
 
 func (a *localTerm) newEntryMenu(m *ui.Menu, target entry, disabled bool) {
@@ -178,24 +213,40 @@ func (a *localTerm) treeItems(c *ui.Context, children map[string][]entry, parent
 	for _, e := range children[parent] {
 		key := c.Key(e.ID)
 		var row ui.Element
+		var open *bool
 		if e.Kind == category {
-			open := a.expansion(e.ID)
-			row = ui.TreeItem(key, "", open, func() { a.treeItems(key, children, e.ID, drop) })
-			if row.DoubleClicked() {
-				*open = !*open
+			open = a.expansion(e.ID)
+			if strings.TrimSpace(a.connectionSearch) != "" {
+				open = new(true)
 			}
+			row = ui.TreeItem(key, "", open, func() { a.treeItems(key, children, e.ID, drop) })
 		} else {
 			target := e.Path
 			if e.Kind == host {
 				target = e.Host
 			}
 			row = ui.TreeItem(key, "", nil, nil).Tooltip(target)
-			if row.DoubleClicked() || row.Shortcut(0, ui.KeyEnter) {
+			if row.Shortcut(0, ui.KeyEnter) {
 				a.launch(e)
 			}
 		}
-		if row.Clicked() {
-			a.selected = e.ID
+		// MyGo reports a double-click on press, before it can distinguish a drag.
+		if row.DoubleClicked() {
+			a.connectionDoublePress = e.ID
+		}
+		clicked := row.Clicked()
+		if a.connectionDoublePress == e.ID && (clicked || !row.Pressed()) {
+			a.connectionDoublePress = ""
+			if clicked {
+				if open != nil {
+					*open = !*open
+				} else {
+					a.launch(e)
+				}
+			}
+		}
+		if clicked {
+			a.selectConnection(c, e.ID)
 		}
 		selected := e.ID == a.selected
 		row.Radius(5).Selected(selected).Label(e.Name).Children(func() {
@@ -248,6 +299,9 @@ func (a *localTerm) treeItems(c *ui.Context, children map[string][]entry, parent
 			if e.Kind != category {
 				if m.Item(a.tr("打开终端", "Open terminal")).Chosen() {
 					a.launch(e)
+				}
+				if e.Kind == host && m.Item(a.tr("打开 SFTP", "Open SFTP")).Chosen() {
+					a.launchSFTP(e)
 				}
 				m.Separator()
 			}
@@ -320,39 +374,36 @@ func (a *localTerm) moveConnection(c *ui.Context, drop connectionDrop) {
 	}
 }
 
-func (a *localTerm) terminals(c *ui.Context) {
-	ui.Column(c).Fill().Background(a.consoleTheme.Background).Children(func() {
-		ui.Row(c).Height(36).Shrink(0).PaddingX(6).Gap(5).AlignItems(ui.Center).Background(c.Theme().Background).Children(func() {
-			ui.ScrollHorizontal(c).Grow(1).MinWidth(0).Children(func() {
-				ui.Row(c).Height(36).AlignItems(ui.Center).Children(func() {
-					// Tab menus can reorder or close sessions while their headers are built.
-					for _, s := range slices.Clone(a.tabs) {
-						if !a.projectView || a.sessionProject(s) == a.projectID {
-							a.tabHeader(c.Key(s), s)
-						}
+const terminalTabContentHeight = 31
+
+func (a *localTerm) terminalTabs(c *ui.Context) {
+	ui.Row(c).Height(terminalTabContentHeight).Shrink(1).MinWidth(0).Gap(4).AlignItems(ui.Center).Children(func() {
+		ui.ScrollHorizontal(c).Shrink(1).MinWidth(0).Children(func() {
+			ui.Row(c).Height(terminalTabContentHeight).AlignItems(ui.Center).Gap(3).Children(func() {
+				// Tab menus can reorder or close sessions while their headers are built.
+				for _, s := range slices.Clone(a.tabs) {
+					if !a.projectView || a.sessionProject(s) == a.projectID {
+						a.tabHeader(c.Key(s), s)
 					}
-				})
-			})
-			label := a.tr("打开本地终端", "Open local terminal")
-			if a.projectView && a.projectID != "" {
-				label = a.tr("新建项目终端", "New project terminal")
-			}
-			iconButton(c, "＋", label).OnClick(func() {
-				if a.projectView && a.projectID != "" {
-					a.launch(a.entryByID(a.projectID))
-				} else {
-					a.openLocal(c)
 				}
 			})
 		})
-		if a.projectView {
-			ui.Box(c).Height(1).FillWidth().Shrink(0).Background(c.Theme().Border)
-		}
+		iconButton(c, "＋", a.tr("新建终端", "New terminal")).Shrink(0).
+			Menu(func(m *ui.Menu) { a.newTerminalMenu(c, m) })
+	})
+}
+
+func (a *localTerm) terminals(c *ui.Context) {
+	ui.Column(c).Fill().Background(a.consoleTheme.Background).Children(func() {
 		ui.Column(c).Grow(1).MinHeight(0).MinWidth(0).Clip().Children(func() {
 			if a.active == nil {
 				return
 			}
 			current := a.active
+			if current.files != nil {
+				a.fileBrowser(c.Key(current), current)
+				return
+			}
 			if current.term == nil {
 				ui.Text(c, a.tr("正在启动终端…", "Starting terminal…")).TextColor(c.Theme().TextMuted).Margin(12)
 				return
@@ -376,28 +427,39 @@ func (a *localTerm) terminals(c *ui.Context) {
 
 func (a *localTerm) tabHeader(c *ui.Context, s *session) {
 	active := a.active == s
-	color := c.Theme().TextMuted
-	row := ui.Row(c).Height(36).MaxWidth(200).Shrink(0).AlignItems(ui.Center).Padding(0, 4, 0, 0).
+	theme := c.Theme()
+	color := theme.TextMuted
+	row := ui.Row(c).Height(terminalTabContentHeight).MaxWidth(200).Shrink(0).AlignItems(ui.Center).Padding(0, 4, 0, 0).
 		ContextMenu(func(m *ui.Menu) { a.tabMenu(m, s) })
-	if active {
-		color = c.Theme().Text
-		row.Background(a.consoleTheme.Background)
-		if a.focusTab {
-			row.ScrollIntoView()
-		}
-	} else if row.Hovered() {
-		row.Background(c.Theme().SurfaceHover)
+	if row.Hovered() || active {
+		color = theme.Text
 	}
-	row.Children(func() {
-		if active {
-			ui.Box(c).Absolute().Left(0).Right(0).Bottom(0).Height(2).Background(c.Theme().Focus)
+	if active && a.focusTab {
+		row.ScrollIntoView()
+	}
+	indicator := s.tabColor
+	height := float32(1)
+	if active {
+		height = 2
+		if indicator == ui.Transparent {
+			indicator = theme.Focus
 		}
-		tab := ui.ButtonBase(c).MinWidth(0).Height(34).PaddingX(10).
+	}
+	row.Draw(func(p *ui.Painter, r ui.Rect) {
+		const inset = 7
+		p.Fill(ui.Rect{X: r.X + r.W - 1, Y: r.Y + inset, W: 1, H: r.H - 2*inset}, theme.Border, 0)
+		if indicator != ui.Transparent {
+			const width = 24
+			p.Fill(ui.Rect{X: r.X + (r.W-width)/2, Y: r.Y + r.H - height, W: width, H: height}, indicator, 0)
+		}
+	})
+	row.Children(func() {
+		tab := ui.ButtonBase(c).MinWidth(0).Height(terminalTabContentHeight-2).Padding(0, 4, 0, 8).
 			AlignItems(ui.Center).Gap(5).Role(ui.RoleTab).Selected(active).Background(ui.Transparent).FocusRing(false).Label(s.name).Tooltip(s.name).
 			OnClick(func() { a.activate(s) })
 		tab.Children(func() {
 			if tab.FocusVisible() {
-				ui.Box(c).Absolute().Top(2).Bottom(2).Left(2).Right(2).Border(1, c.Theme().Focus)
+				ui.Box(c).Absolute().Top(3).Bottom(3).Left(2).Right(1).Border(1, theme.Focus)
 			}
 			if s.pinned {
 				ui.Box(c).Size(10, 12).Shrink(0).Draw(func(p *ui.Painter, r ui.Rect) {
@@ -414,13 +476,23 @@ func (a *localTerm) tabHeader(c *ui.Context, s *session) {
 				label.Bold()
 			}
 		})
-		closeButton := ui.ButtonBase(c).Size(22, 22).Radius(4).Center().Label(a.tr("关闭 ", "Close ") + s.name).Tooltip(a.tr("关闭页签", "Close tab")).
+		closeButton := ui.ButtonBase(c).Size(22, 22).Shrink(0).Center().Background(ui.Transparent).FocusRing(false).
+			Label(a.tr("关闭 ", "Close ") + s.name).Tooltip(a.tr("关闭页签", "Close tab")).
 			OnClick(func() { a.closeTab(s) })
+		closeColor := theme.TextMuted
 		if closeButton.Hovered() {
-			closeButton.Background(c.Theme().SurfacePressed)
+			closeColor = theme.Text
 		}
 		closeButton.Children(func() {
-			ui.Text(c, "×").FontSize(interfaceTextSize(c, 16)).TextColor(c.Theme().TextMuted)
+			if closeButton.FocusVisible() {
+				ui.Box(c).Absolute().Top(1).Bottom(1).Left(1).Right(1).Border(1, theme.Focus)
+			}
+			ui.Box(c).Size(10, 10).Draw(func(p *ui.Painter, r ui.Rect) {
+				var cross ui.Path
+				cross.MoveTo(r.X+2, r.Y+2).LineTo(r.X+8, r.Y+8)
+				cross.MoveTo(r.X+8, r.Y+2).LineTo(r.X+2, r.Y+8)
+				p.StrokePath(&cross, 1.4, closeColor)
+			})
 		})
 	})
 }
@@ -433,7 +505,7 @@ func formInput(c *ui.Context, label string, value *string, hint string) ui.Eleme
 func (a *localTerm) entryForm(c *ui.Context, form *editor) {
 	open := form.open
 	ui.Modal(c, &open, func() {
-		ui.Column(c).Width(390).Gap(12).Disabled(a.savingEntries).Children(func() {
+		ui.Column(c).Width(390).MinHeight(0).Shrink(1).Gap(12).Disabled(a.savingEntries).Children(func() {
 			title := a.tr("新建条目", "New connection")
 			switch {
 			case form.add && form.fixedKind:
@@ -442,78 +514,106 @@ func (a *localTerm) entryForm(c *ui.Context, form *editor) {
 				title = a.tr("编辑", "Edit ") + a.kindLabel(form.entry.Kind)
 			}
 			ui.Text(c, title).FontSize(interfaceTextSize(c, 20)).Bold().Margin(0, 0, 4)
-			if form.add && !form.fixedKind {
-				ui.Row(c).Gap(6).Children(func() {
-					for _, kind := range []entryKind{category, host, local} {
-						b := ui.Button(c.Key(kind), a.kindLabel(kind)).OnClick(func() {
-							form.entry.Kind, form.error, form.focusName = kind, "", true
+			ui.Scroll(c).MinHeight(0).Shrink(1).Children(func() {
+				ui.Column(c).FillWidth().Gap(12).Children(func() {
+					if form.add && !form.fixedKind {
+						ui.Row(c).Gap(6).Children(func() {
+							for _, kind := range []entryKind{category, host, local} {
+								b := ui.Button(c.Key(kind), a.kindLabel(kind)).OnClick(func() {
+									form.entry.Kind, form.error, form.focusName = kind, "", true
+								})
+								if form.entry.Kind == kind {
+									b.Selected(true).Background(c.Theme().Selection).TextColor(c.Theme().Text)
+								}
+							}
 						})
-						if form.entry.Kind == kind {
-							b.Selected(true).Background(c.Theme().Selection).TextColor(c.Theme().Text)
+					}
+					if form.add && form.entry.Parent != "" {
+						ui.Checkbox(c, &form.atRoot, a.tr("放在根层", "Add at top level"))
+						if !form.atRoot {
+							ui.Text(c, a.tr("添加到 ", "Add to ")+a.entryByID(form.entry.Parent).Name).
+								TextColor(c.Theme().TextMuted).SingleLine()
 						}
 					}
-				})
-			}
-			if form.add && form.entry.Parent != "" {
-				ui.Checkbox(c, &form.atRoot, a.tr("放在根层", "Add at top level"))
-				if !form.atRoot {
-					ui.Text(c, a.tr("添加到 ", "Add to ")+a.entryByID(form.entry.Parent).Name).
-						TextColor(c.Theme().TextMuted).SingleLine()
-				}
-			}
-			name := formInput(c, a.tr("名称", "Name"), &form.entry.Name, a.tr("显示在连接树中", "Shown in the sidebar")).AutoFocus()
-			if form.focusName {
-				name.Focus()
-				form.focusName = false
-			}
-			switch form.entry.Kind {
-			case host:
-				formInput(c, a.tr("SSH 别名或主机地址", "SSH alias or host address"), &form.entry.Host, a.tr("例如 dev 或 server.example.com", "e.g. dev or server.example.com"))
-				formInput(c, a.tr("用户名（可选）", "Username (optional)"), &form.entry.User, a.tr("留空时使用 SSH 配置", "Uses SSH config if blank"))
-				formInput(c, a.tr("端口（可选）", "Port (optional)"), &form.entry.Port, a.tr("留空时使用 SSH 配置", "Uses SSH config if blank"))
-			case local:
-				ui.Text(c, a.tr("工作目录", "Working directory")).FontSize(interfaceTextSize(c, 12)).Bold()
-				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-					ui.TextInput(c, &form.entry.Path).Label(a.tr("工作目录", "Working directory")).Placeholder("/Users/…").Grow(1).MinWidth(0)
-					browse := a.tr("选择…", "Browse…")
-					if form.picking {
-						browse = a.tr("正在打开…", "Opening…")
+					name := formInput(c, a.tr("名称", "Name"), &form.entry.Name, a.tr("显示在连接树中", "Shown in the sidebar")).AutoFocus()
+					if form.focusName {
+						name.Focus()
+						form.focusName = false
 					}
-					ui.Button(c, browse).Disabled(form.picking || a.savingEntries).OnClick(func() { a.pickDirectory(form) })
-				})
-			}
-			if form.entry.Kind != category {
-				hint := a.tr("在本地工作目录中执行", "Run in the local working directory")
-				if form.entry.Kind == host {
-					hint = a.tr("连接后在远程主机上执行", "Run on the remote host after connecting")
-				}
-				formInput(c, a.tr("启动命令（可选）", "Startup command (optional)"), &form.entry.StartupCommand, hint)
-			}
-			if a.projectView && form.entry.isProject() {
-				ui.Row(c).Gap(8).Children(func() {
-					ui.Column(c).Grow(1).MinWidth(0).Children(func() {
-						formInput(c, a.tr("项目页签文字", "Project tab title"), &form.entry.ProjectTitle, a.tr("默认使用配置名称", "Defaults to configuration name"))
-					})
-					ui.Column(c).Width(100).Shrink(0).Children(func() {
-						formInput(c, a.tr("项目图标", "Project icon"), &form.entry.ProjectIcon, a.tr("例如 📁", "e.g. 📁"))
-					})
-				})
-				ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-					if bitmap := form.entry.projectBitmap; bitmap != nil {
-						ui.Image(c, bitmap).Size(24, 24).Fit(ui.Contain)
-					}
-					ui.Button(c, a.tr("选择本地图标…", "Choose local icon…")).Disabled(form.picking).
-						OnClick(func() { a.pickProjectIcon(form) })
-					if form.entry.ProjectImage != "" {
-						ui.Button(c, a.tr("移除本地图标", "Remove local icon")).Disabled(form.picking).OnClick(func() {
-							form.entry.ProjectImage, form.entry.projectBitmap, form.error = "", nil, ""
+					switch form.entry.Kind {
+					case host:
+						formInput(c, a.tr("SSH 别名或主机地址", "SSH alias or host address"), &form.entry.Host, a.tr("例如 dev 或 server.example.com", "e.g. dev or server.example.com"))
+						formInput(c, a.tr("用户名（可选）", "Username (optional)"), &form.entry.User, a.tr("留空时使用 SSH 配置", "Uses SSH config if blank"))
+						formInput(c, a.tr("端口（可选）", "Port (optional)"), &form.entry.Port, a.tr("留空时使用 SSH 配置", "Uses SSH config if blank"))
+					case local:
+						ui.Text(c, a.tr("工作目录", "Working directory")).FontSize(interfaceTextSize(c, 12)).Bold()
+						ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+							ui.TextInput(c, &form.entry.Path).Label(a.tr("工作目录", "Working directory")).Placeholder("/Users/…").Grow(1).MinWidth(0)
+							browse := a.tr("选择…", "Browse…")
+							if form.picking {
+								browse = a.tr("正在打开…", "Opening…")
+							}
+							ui.Button(c, browse).Disabled(form.picking || a.savingEntries).OnClick(func() { a.pickDirectory(form) })
 						})
 					}
+					if form.entry.Kind != category {
+						hint := a.tr("在本地工作目录中执行", "Run in the local working directory")
+						if form.entry.Kind == host {
+							hint = a.tr("连接后在远程主机上执行", "Run on the remote host after connecting")
+						}
+						formInput(c, a.tr("启动命令（可选）", "Startup command (optional)"), &form.entry.StartupCommand, hint)
+					}
+					if form.entry.Kind == host {
+						label := a.tr("SSH 私钥（可选）", "SSH private key (optional)")
+						ui.Text(c, label).FontSize(interfaceTextSize(c, 12)).Bold()
+						ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+							ui.TextInput(c, &form.entry.IdentityFile).Label(label).Grow(1).MinWidth(0).
+								Placeholder(a.tr("留空时使用 SSH 默认认证", "Uses default SSH authentication if blank"))
+							ui.Button(c, a.tr("从 ~/.ssh 选择", "Choose from ~/.ssh")).Menu(func(m *ui.Menu) {
+								if m.Item(a.tr("使用默认认证", "Use default authentication")).Checked(form.entry.IdentityFile == "").Chosen() {
+									form.entry.IdentityFile = ""
+									return
+								}
+								names := sshIdentityNames()
+								if len(names) == 0 {
+									m.Item(a.tr("未找到 SSH 私钥", "No SSH private keys found")).Disabled(true)
+								}
+								for _, name := range names {
+									path := "~/.ssh/" + name
+									if m.Item(name).Checked(form.entry.IdentityFile == path).Chosen() {
+										form.entry.IdentityFile = path
+									}
+								}
+							})
+						})
+					}
+					if a.projectView && form.entry.isProject() {
+						ui.Row(c).Gap(8).Children(func() {
+							ui.Column(c).Grow(1).MinWidth(0).Children(func() {
+								formInput(c, a.tr("项目页签文字", "Project tab title"), &form.entry.ProjectTitle, a.tr("默认使用配置名称", "Defaults to configuration name"))
+							})
+							ui.Column(c).Width(100).Shrink(0).Children(func() {
+								formInput(c, a.tr("项目图标", "Project icon"), &form.entry.ProjectIcon, a.tr("例如 📁", "e.g. 📁"))
+							})
+						})
+						ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+							if bitmap := form.entry.projectBitmap; bitmap != nil {
+								ui.Image(c, bitmap).Size(24, 24).Fit(ui.Contain)
+							}
+							ui.Button(c, a.tr("选择本地图标…", "Choose local icon…")).Disabled(form.picking).
+								OnClick(func() { a.pickProjectIcon(form) })
+							if form.entry.ProjectImage != "" {
+								ui.Button(c, a.tr("移除本地图标", "Remove local icon")).Disabled(form.picking).OnClick(func() {
+									form.entry.ProjectImage, form.entry.projectBitmap, form.error = "", nil, ""
+								})
+							}
+						})
+					}
+					if form.error != "" {
+						ui.Text(c, form.error).TextColor(c.Theme().Danger)
+					}
 				})
-			}
-			if form.error != "" {
-				ui.Text(c, form.error).TextColor(c.Theme().Danger)
-			}
+			})
 			ui.Row(c).Justify(ui.End).Gap(8).Margin(6, 0, 0).Children(func() {
 				ui.Button(c, a.tr("取消", "Cancel")).Disabled(a.savingEntries).OnClick(func() { form.open = false })
 				save := a.tr("保存", "Save")

@@ -1,0 +1,19 @@
+[tools]
+go = "1.27.1"
+"go:github.com/egoist/mygo/cmd/mygo" = "0.4.5"
+
+[tasks.dev]
+description = "启动 Hostern 开发模式"
+run = "mygo dev"
+
+[tasks.build]
+description = "打包 Hostern macOS 应用"
+run = "mygo build"
+
+[tasks.test]
+description = "运行 Go 测试"
+run = "go test ./..."
+
+[tasks.vet]
+description = "运行 MyGo 静态检查"
+run = "mygo vet ."

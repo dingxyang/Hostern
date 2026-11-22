@@ -7,25 +7,29 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 
 	"github.com/dingxyang/localterm/internal/terminal"
 	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/plugins/updater"
+	"github.com/egoist/mygo/plugins/updater/native"
 	"github.com/egoist/mygo/ui"
 )
 
 type session struct {
-	entryID string
-	name    string
-	kind    entryKind
-	term    *terminal.Terminal
-	pinned  bool
+	entryID  string
+	name     string
+	kind     entryKind
+	files    *fileSession
+	term     *terminal.Terminal
+	pinned   bool
+	tabColor ui.Color
 }
 
 type editor struct {
 	fixedKind     bool
 	addToProjects bool
-	fromSettings  bool
 	entry         entry
 	add           bool
 	open          bool
@@ -49,12 +53,14 @@ type localTerm struct {
 	settingsUIFonts   []string
 	quickCommandForm  *quickCommandForm
 	tabTitle          *tabTitleForm
+	tabColorPicker    *tabColorPicker
 	win               *mygo.Window
 	update            func(func())
 	storePath         string
 	storeError        error
 	savingEntries     bool
 	entries           []entry
+	connectionSearch  string
 	selected          string
 	expanded          map[string]*bool
 	editor            *editor
@@ -69,6 +75,8 @@ type localTerm struct {
 	projectView       bool
 	projectID         string
 	openOnStart       bool
+
+	connectionDoublePress string
 }
 
 func main() {
@@ -104,7 +112,28 @@ func main() {
 			(app.preferences.Font != "" && app.preferences.Font != "Menlo") {
 			systemFontFamilies()
 		}
+		if runtime.GOOS == "darwin" {
+			mygo.App.SetMenu(mygo.NewMenu([]*mygo.MenuItem{
+				{Label: "Hostern", Submenu: []*mygo.MenuItem{
+					{Role: mygo.RoleAbout},
+					updater.MenuItem(),
+					mygo.Separator(),
+					{Role: mygo.RoleServices},
+					mygo.Separator(),
+					{Role: mygo.RoleHide},
+					{Role: mygo.RoleHideOthers},
+					{Role: mygo.RoleUnhide},
+					mygo.Separator(),
+					{Role: mygo.RoleQuit},
+				}},
+				{Role: mygo.RoleFileMenu},
+				{Role: mygo.RoleEditMenu},
+				{Role: mygo.RoleViewMenu},
+				{Role: mygo.RoleWindowMenu},
+			}))
+		}
 		app.storeError = err
+		app.restoreConnectionSelection()
 		mygo.Theme.SetSource(normalizeAppearance(app.preferences.Appearance))
 		app.win = mygo.NewWindow(mygo.WindowOptions{
 			Title: "Hostern", Width: 1080, Height: 680,
@@ -119,6 +148,7 @@ func main() {
 		mygo.App.OnQuit(app.closeSessions)
 		mygo.App.OnSecondInstance(func([]string, string) { app.win.Focus() })
 	})
+	mygo.Use(native.Plugin)
 	if err := mygo.App.Run(); err != nil {
 		log.Fatal(err)
 	}
@@ -126,6 +156,28 @@ func main() {
 
 func (a *localTerm) selectedEntry() entry {
 	return a.entryByID(a.selected)
+}
+
+func (a *localTerm) restoreConnectionSelection() {
+	e := a.entryByID(a.preferences.SelectedConnection)
+	a.selected = e.ID
+	for parent := e.Parent; parent != ""; parent = a.entryByID(parent).Parent {
+		*a.expansion(parent) = true
+	}
+}
+
+func (a *localTerm) selectConnection(c *ui.Context, id string) {
+	a.selected = id
+	if a.settingsPath == "" || a.preferences.SelectedConnection == id {
+		return
+	}
+	next := a.preferences
+	next.SelectedConnection = id
+	if err := saveJSON(a.settingsPath, next); err != nil {
+		c.Toast(a.tr("无法保存选中的连接：", "Could not save the selected connection: ") + err.Error())
+		return
+	}
+	a.preferences = next
 }
 
 func (a *localTerm) entryByID(id string) entry {
@@ -298,6 +350,12 @@ func (a *localTerm) closeTab(s *session) {
 	if i < 0 {
 		return
 	}
+	if a.tabTitle != nil && a.tabTitle.session == s {
+		a.tabTitle = nil
+	}
+	if a.tabColorPicker != nil && a.tabColorPicker.session == s {
+		a.tabColorPicker = nil
+	}
 	a.tabs = slices.Delete(a.tabs, i, i+1)
 	if a.active == s {
 		if a.projectView {
@@ -319,6 +377,10 @@ func (a *localTerm) closeSessions() {
 }
 
 func (s *session) close() {
+	if s.files != nil {
+		s.files.cancel()
+		defer s.files.removeSocketDir()
+	}
 	if s.term != nil {
 		if err := s.term.Close(); err != nil {
 			log.Printf("关闭终端 %q：%v", s.name, err)
@@ -327,16 +389,30 @@ func (s *session) close() {
 }
 
 func (a *localTerm) launch(e entry) {
+	a.launchSession(e, nil)
+}
+
+func (a *localTerm) launchSession(e entry, files *fileSession) {
 	font := a.preferences.terminalFont()
 	theme := a.consoleTheme
 	if theme == nil {
-		theme = &paletteFor(a.preferences.Appearance, false).console
+		theme = &paletteFor(a.preferences.Appearance, false, a.preferences.ThemeStyle).console
 	}
-	s := &session{entryID: e.ID, name: e.Name, kind: e.Kind}
+	name := e.Name
+	if files != nil {
+		name = "SFTP · " + name
+	}
+	s := &session{entryID: e.ID, name: name, kind: e.Kind, files: files}
 	a.tabs = append(a.tabs, s)
 	a.activate(s)
 	a.runTask(func() func() {
-		term, err := newTerminal(e, font, theme)
+		var term *terminal.Terminal
+		var err error
+		if files == nil {
+			term, err = newTerminal(e, font, theme)
+		} else {
+			term, err = terminal.New(terminal.Options{Theme: theme, Font: font, Command: e.sftpMasterCommand(files.socket)})
+		}
 		return func() {
 			s.term = term
 			if !slices.Contains(a.tabs, s) {
@@ -346,18 +422,27 @@ func (a *localTerm) launch(e entry) {
 			if err != nil {
 				a.closeTab(s)
 				a.terminalErrors = append(a.terminalErrors,
-					fmt.Sprintf(a.tr("无法打开 %s：%v", "Could not open %s: %v"), e.Name, err))
+					fmt.Sprintf(a.tr("无法打开 %s：%v", "Could not open %s: %v"), name, err))
 				return
 			}
 			term.SetFont(a.preferences.terminalFont())
 			if a.consoleTheme != nil && a.consoleTheme != theme {
 				term.SetTheme(a.consoleTheme, nil)
 			}
+			if files != nil {
+				a.connectFiles(s, e.Host)
+			}
 		}
 	})
 }
 
 func (a *localTerm) openLocal(c *ui.Context) {
+	e := a.selectedEntry()
+	if !a.projectView && e.Kind == local && checkDirectory(e.Path) == nil {
+		e.StartupCommand = ""
+		a.launch(e)
+		return
+	}
 	dir, err := os.UserHomeDir()
 	if err != nil {
 		c.Toast(a.tr("无法获取用户主目录：", "Could not find your home directory: ") + err.Error())

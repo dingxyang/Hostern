@@ -16,6 +16,48 @@ type palette struct {
 var lightPalette = newPalette(false)
 var darkPalette = newPalette(true)
 
+type themeStyle struct {
+	id, chinese, english string
+	light, dark          *palette
+}
+
+var themeStyles = []themeStyle{
+	{"", "默认", "Default", lightPalette, darkPalette},
+	{"ocean", "海蓝", "Ocean",
+		tintedPalette(lightPalette, "#EEF5FA", "#F8FCFF", "#1D678F", "#246F9B"),
+		tintedPalette(darkPalette, "#14222E", "#192C3A", "#276B96", "#83C8F4")},
+	{"forest", "松林", "Forest",
+		tintedPalette(lightPalette, "#EFF5ED", "#F8FCF6", "#366D45", "#397B4D"),
+		tintedPalette(darkPalette, "#17251F", "#1C3027", "#347153", "#91D7A8")},
+}
+
+func appearanceStyle(id string) themeStyle {
+	for _, style := range themeStyles {
+		if style.id == id {
+			return style
+		}
+	}
+	return themeStyles[0]
+}
+
+func tintedPalette(base *palette, background, workspace, accent, focus string) *palette {
+	p := *base
+	chrome := &p.chrome
+	chrome.Background = ui.Hex(background)
+	chrome.Surface = ui.Hex(workspace)
+	chrome.Accent, chrome.Focus = ui.Hex(accent), ui.Hex(focus)
+	chrome.Border = chrome.Background.Mix(chrome.Text, 0.15)
+	chrome.SurfaceHover = chrome.Surface.Mix(chrome.Text, 0.08)
+	chrome.SurfacePressed = chrome.Surface.Mix(chrome.Text, 0.13)
+	chrome.AccentHover = chrome.Accent.Mix(ui.Hex("#000000"), 0.1)
+	chrome.AccentPressed = chrome.Accent.Mix(ui.Hex("#000000"), 0.2)
+	chrome.Selection = chrome.Background.Mix(chrome.Focus, 0.18)
+	p.console.Background = chrome.Surface
+	p.console.Cursor = chrome.Focus
+	p.console.Selection = p.console.Background.Mix(chrome.Focus, 0.28)
+	return &p
+}
+
 func normalizeAppearance(source mygo.ThemeSource) mygo.ThemeSource {
 	switch source {
 	case mygo.ThemeLight, mygo.ThemeDark:
@@ -25,11 +67,12 @@ func normalizeAppearance(source mygo.ThemeSource) mygo.ThemeSource {
 	}
 }
 
-func paletteFor(source mygo.ThemeSource, systemDark bool) *palette {
+func paletteFor(source mygo.ThemeSource, systemDark bool, id string) *palette {
+	style := appearanceStyle(id)
 	if source == mygo.ThemeDark || (normalizeAppearance(source) == mygo.ThemeSystem && systemDark) {
-		return darkPalette
+		return style.dark
 	}
-	return lightPalette
+	return style.light
 }
 
 func newPalette(dark bool) *palette {
@@ -84,16 +127,20 @@ func interfaceTextSize(c *ui.Context, size float32) float32 {
 }
 
 func (a *localTerm) applyTheme(c *ui.Context) {
-	p := paletteFor(a.preferences.Appearance, c.Theme().Dark)
-	theme := p.chrome
-	if a.preferences.UIFont != systemUIFont {
-		theme.Font = a.preferences.UIFont
+	appearance := a.preferences
+	if a.settingsOpen {
+		appearance = a.settingsDraft
 	}
-	if size, _ := strconv.Atoi(a.preferences.UIFontSize); size > 0 {
+	p := paletteFor(appearance.Appearance, c.Theme().Dark, appearance.ThemeStyle)
+	theme := p.chrome
+	if appearance.UIFont != "" && appearance.UIFont != systemUIFont {
+		theme.Font = appearance.UIFont
+	}
+	if size, _ := strconv.Atoi(appearance.UIFontSize); size > 0 {
 		theme.FontSize = float32(size)
 	}
 	c.SetTheme(&theme)
-	c.Root().FontWeight(fontWeight(a.preferences.UIBold))
+	c.Root().FontWeight(fontWeight(appearance.UIBold))
 	if a.consoleTheme != &p.console {
 		a.consoleTheme = &p.console
 		for _, s := range a.tabs {

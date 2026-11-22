@@ -39,6 +39,13 @@ type glyphRun struct {
 	c      ui.Color
 }
 
+// rowBuffer holds temporary data shared by the rows rebuilt in a frame.
+type rowBuffer struct {
+	text   []rune
+	cols   []int16
+	widths []int8
+}
+
 type deco struct {
 	x0, x1 int
 	kind   int // an underline style, decoStrike or decoOverline
@@ -183,6 +190,8 @@ func (v *view) resolve(s vt.Style) resolved {
 
 // buildRow makes the cache of the render state's current row.
 func (v *view) buildRow(line *rowCache, rs *vt.RenderState, cols int) {
+	// Keep the old run slots available while rebuilding the row in place.
+	previousRuns := line.runs
 	*line = rowCache{ok: true, bgs: line.bgs[:0], runs: line.runs[:0], decos: line.decos[:0], boxes: line.boxes[:0], wide: line.wide[:0]}
 	cells := rs.RowCells()
 	line.selA, line.selB, line.sel = rs.RowSelection()
@@ -207,15 +216,11 @@ func (v *view) buildRow(line *rowCache, rs *vt.RenderState, cols int) {
 		}{c.Style, r})
 		return r
 	}
-	var run struct {
-		text    []rune
-		cols    []int16 // the column of each rune
-		widths  []int8
-		fg      ui.Color
-		variant int
-	}
+	run := &v.rowBuffer
+	var fg ui.Color
+	var variant int
 	flush := func() {
-		v.shapeRun(line, run.text, run.cols, run.widths, run.fg, run.variant)
+		v.shapeRun(line, previousRuns, run.text, run.cols, run.widths, fg, variant)
 		run.text, run.cols, run.widths = run.text[:0], run.cols[:0], run.widths[:0]
 	}
 	var buf []rune
@@ -261,16 +266,16 @@ func (v *view) buildRow(line *rowCache, rs *vt.RenderState, cols int) {
 			line.boxes = append(line.boxes, boxCell{x, cp, st.fg})
 			cp = ' '
 		}
-		if len(run.text) > 0 && (st.variant != run.variant || st.fg != run.fg) {
+		if len(run.text) > 0 && (st.variant != variant || st.fg != fg) {
 			if cp == ' ' {
 				// A space draws nothing: it can join any run.
-				st.variant, st.fg = run.variant, run.fg
+				st.variant, st.fg = variant, fg
 			} else {
 				flush()
 			}
 		}
 		if len(run.text) == 0 {
-			run.fg, run.variant = st.fg, st.variant
+			fg, variant = st.fg, st.variant
 		}
 		buf = buf[:0]
 		if c.Grapheme && cp != ' ' {
@@ -290,6 +295,7 @@ func (v *view) buildRow(line *rowCache, rs *vt.RenderState, cols int) {
 		}
 	}
 	flush()
+	clear(previousRuns[min(len(line.runs), len(previousRuns)):])
 }
 
 func (r resolved) ulColor() ui.Color {
@@ -311,7 +317,7 @@ func (v *view) addDeco(line *rowCache, x0, x1, kind int, c ui.Color) {
 }
 
 // shapeRun shapes a run of cells and places its glyphs in their cells.
-func (v *view) shapeRun(line *rowCache, text []rune, cols []int16, widths []int8, fg ui.Color, variant int) {
+func (v *view) shapeRun(line *rowCache, previousRuns []glyphRun, text []rune, cols []int16, widths []int8, fg ui.Color, variant int) {
 	// Trailing spaces draw nothing.
 	for len(text) > 0 && text[len(text)-1] == ' ' {
 		text, cols, widths = text[:len(text)-1], cols[:len(cols)-1], widths[:len(widths)-1]
@@ -321,7 +327,14 @@ func (v *view) shapeRun(line *rowCache, text []rune, cols []int16, widths []int8
 	}
 	shaped := v.shape(string(text), variant, 1)
 	cw := float32(v.cellW) / v.scale
-	out := glyphRun{glyphs: make([]ui.Glyph, 0, len(shaped)), cols: make([]int16, 0, len(shaped)), c: fg}
+	out := glyphRun{c: fg}
+	if i := len(line.runs); i < len(previousRuns) {
+		old := previousRuns[i]
+		out.glyphs = old.glyphs[:0]
+		out.cols = old.cols[:0]
+	}
+	out.glyphs = slices.Grow(out.glyphs, len(shaped))
+	out.cols = slices.Grow(out.cols, len(shaped))
 	// The glyphs of a cell, or of the cells a ligature spans, keep their
 	// places relative to each other and are centered in the cells, as the
 	// glyphs of fallback fonts, wider or narrower than a cell, are. Those
@@ -369,6 +382,11 @@ func (v *view) shapeRun(line *rowCache, text []rune, cols []int16, widths []int8
 			out.cols = append(out.cols, col)
 		}
 		i = j + 1
+	}
+	if i := len(line.runs); i < len(previousRuns) {
+		// A shorter run should not keep font references from its old tail.
+		oldLen := len(previousRuns[i].glyphs)
+		clear(out.glyphs[min(len(out.glyphs), oldLen):oldLen])
 	}
 	line.runs = append(line.runs, out)
 }

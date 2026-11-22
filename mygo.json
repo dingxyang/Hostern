@@ -2,5 +2,9 @@
   "name": "Hostern",
   "identifier": "com.dingxyang.localterm",
   "version": "0.1.0",
+  "updates": {
+    "github": "dingxyang/Hostern",
+    "publicKey": "eg6K2/GUkf8hA2STSVqXD4xPVpI9rO8smiw0rrk2hoc="
+  },
   "macos": { "minimumSystemVersion": "13.0" }
 }
