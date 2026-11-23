@@ -508,6 +508,23 @@ func (t *Terminal) Dir() string {
 	return fileURLPath(pwd)
 }
 
+// ProcessDir returns the operating system's working directory for the
+// running PTY process, or "" if it is unavailable.
+func (t *Terminal) ProcessDir() string {
+	t.mu.Lock()
+	proc, closed := t.proc, t.closed
+	t.mu.Unlock()
+	if closed || proc == nil {
+		return ""
+	}
+	select {
+	case <-proc.Exited():
+		return ""
+	default:
+		return proc.WorkingDirectory()
+	}
+}
+
 // SetFont changes the font, as Options.Font.
 // set them, as for zooming.
 func (t *Terminal) SetFont(f Font) {

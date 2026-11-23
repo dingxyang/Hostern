@@ -409,7 +409,7 @@ func (a *localTerm) terminals(c *ui.Context) {
 				return
 			}
 			view := terminal.ViewWithMenu(c.Key(current), current.term, a.tr, func(m *ui.Menu, selection string) {
-				a.terminalMenu(c.Services(), m, current, selection)
+				a.terminalMenu(c, m, current, selection)
 			}).Grow(1).MinHeight(0)
 			if a.focusTab {
 				view.Focus()

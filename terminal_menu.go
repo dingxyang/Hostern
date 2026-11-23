@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -130,12 +131,23 @@ func (a *localTerm) openTabTitle(s *session) {
 	a.tabTitle = &tabTitleForm{session: s, title: s.name, open: true}
 }
 
-func (a *localTerm) terminalMenu(services ui.Services, m *ui.Menu, s *session, selection string) {
+func (a *localTerm) terminalMenu(c *ui.Context, m *ui.Menu, s *session, selection string) {
 	m.Separator()
 	a.quickCommandsMenu(m, s, selection)
+	if s.kind == local && m.Item(a.tr("将当前路径添加到本地工作目录…", "Add Current Path to Local Directories…")).
+		Disabled(a.savingEntries || a.storeError != nil).Chosen() {
+		path := s.term.ProcessDir()
+		if !filepath.IsAbs(path) {
+			c.Toast(a.tr("无法获取当前工作目录", "Could not get the current working directory"))
+			return
+		}
+		a.newEntry(local, a.selectedEntry(), true)
+		a.editor.entry.Name = filepath.Base(path)
+		a.editor.entry.Path = path
+	}
 	if m.Item(a.tr("复制终端输出", "Copy Terminal Output")).Chosen() {
 		if output := s.term.Text(); output != "" {
-			services.WriteClipboard(output)
+			c.Services().WriteClipboard(output)
 		}
 	}
 	m.Separator()

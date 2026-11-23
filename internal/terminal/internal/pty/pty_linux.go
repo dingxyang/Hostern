@@ -8,6 +8,11 @@ import (
 	"unsafe"
 )
 
+func (p *PTY) WorkingDirectory() string {
+	path, _ := os.Readlink("/proc/" + strconv.Itoa(p.Pid()) + "/cwd")
+	return path
+}
+
 func openMaster() (*os.File, string, error) {
 	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR|syscall.O_NOCTTY|syscall.O_CLOEXEC, 0)
 	if err != nil {

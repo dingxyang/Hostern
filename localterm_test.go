@@ -601,6 +601,58 @@ func TestBackgroundDirectorySaveAndTerminalLaunch(t *testing.T) {
 	}
 }
 
+func TestAddCurrentTerminalDirectory(t *testing.T) {
+	if os.Getenv("MYGO_GHOSTTY_VT") == "" {
+		t.Skip("set MYGO_GHOSTTY_VT to a local Ghostty dynamic library to run the PTY test")
+	}
+	t.Setenv("SHELL", "/bin/sh")
+	start := t.TempDir()
+	dir := filepath.Join(start, "新 工作目录")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	physical, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &localTerm{sidebar: 270, storePath: filepath.Join(start, "connections.json")}
+	app.launch(entry{Kind: local, Name: "本地终端", Path: start})
+	t.Cleanup(app.closeSessions)
+	view := ui.NewTester(app.view, 800, 530)
+	app.active.term.Send([]byte("cd '新 工作目录' && printf '\\033]0;cwd-ready\\007'\n"))
+	deadline := time.Now().Add(5 * time.Second)
+	for app.active.term.Title() != "cwd-ready" {
+		if time.Now().After(deadline) {
+			t.Fatal("the shell did not change directory")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	const action = "将当前路径添加到本地工作目录…"
+	if err := view.RightClick("Terminal"); err != nil {
+		t.Fatal(err)
+	}
+	if err := view.ChooseMenuItem(action); err != nil {
+		t.Fatal(err)
+	}
+	if form := app.editor; form == nil || !form.open || form.entry.Path != physical || form.entry.Name != filepath.Base(dir) {
+		t.Fatalf("the editor should contain the changed directory: %+v", form)
+	}
+	click(t, view, "保存")
+	saved, err := loadEntries(app.storePath)
+	if err != nil || len(saved) != 1 || saved[0].Kind != local || saved[0].Path != physical || !view.HasText(filepath.Base(dir)) {
+		t.Fatalf("the directory should appear in the sidebar and be persisted: %+v, %v", saved, err)
+	}
+
+	app.active.kind = host
+	view.Frame()
+	if err := view.RightClick("Terminal"); err != nil {
+		t.Fatal(err)
+	}
+	if err := view.ChooseMenuItem(action); err == nil {
+		t.Fatal("the local directory action should be absent in SSH sessions")
+	}
+}
+
 func TestQuickCommandsUI(t *testing.T) {
 	if os.Getenv("MYGO_GHOSTTY_VT") == "" {
 		t.Skip("set MYGO_GHOSTTY_VT to test terminal selection and paste")
