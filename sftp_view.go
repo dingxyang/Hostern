@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path"
 	"strings"
 
 	"github.com/dingxyang/localterm/internal/terminal"
@@ -10,12 +11,14 @@ import (
 )
 
 type fileForm struct {
-	pane   *filePane
-	title  string
-	name   string
-	item   os.FileInfo
-	remove bool
-	open   bool
+	pane         *filePane
+	title        string
+	name         string
+	item         os.FileInfo
+	remove       bool
+	open         bool
+	conflict     func(overwrite bool)
+	canOverwrite bool
 }
 
 const sftpSizeWidth = 72
@@ -37,7 +40,7 @@ func (a *localTerm) fileBrowser(c *ui.Context, s *session) {
 				if p == &f.remote {
 					label = a.tr("← 下载", "← Download")
 				}
-				ui.Button(c.Key(p), label).Disabled(!f.canTransfer(file)).OnClick(func() {
+				ui.Button(c.Key(p), label).Disabled(!f.canTransfer(p, file)).OnClick(func() {
 					a.transferFile(f, p, file)
 				})
 			}
@@ -62,8 +65,8 @@ func selectedFile(p *filePane) os.FileInfo {
 	return nil
 }
 
-func (f *fileSession) canTransfer(file os.FileInfo) bool {
-	return !f.busy && f.client != nil && f.local.dir != "" && file != nil && file.Mode().IsRegular()
+func (f *fileSession) canTransfer(p *filePane, file os.FileInfo) bool {
+	return !f.busy && f.client != nil && f.local.dir != "" && file != nil && (file.Mode().IsRegular() || p == &f.local && file.IsDir())
 }
 
 func (a *localTerm) filePanel(c *ui.Context, s *session, p *filePane, title string) {
@@ -211,7 +214,7 @@ func (a *localTerm) fileContextMenu(c *ui.Context, m *ui.Menu, s *session, p *fi
 		if m.Item(a.tr("打开目录", "Open Folder")).Disabled(disabled || !item.IsDir() && item.Mode()&os.ModeSymlink == 0).Chosen() {
 			a.refreshFiles(f, p, name, nil)
 		}
-		if m.Item(label).Disabled(!f.canTransfer(item)).Chosen() {
+		if m.Item(label).Disabled(!f.canTransfer(p, item)).Chosen() {
 			a.transferFile(f, p, item)
 		}
 		m.Separator()
@@ -243,10 +246,24 @@ func (a *localTerm) fileActionDialog(c *ui.Context, f *fileSession, form *fileFo
 	ui.Modal(c, &form.open, func() {
 		ui.Column(c).Width(330).Gap(10).Children(func() {
 			ui.Text(c, form.title).Bold()
+			if form.conflict != nil {
+				ui.Text(c, fmt.Sprintf(a.tr("远程已存在「%s」。", "“%s” already exists on the remote server."), form.name))
+				ui.Row(c).Justify(ui.End).Gap(8).Children(func() {
+					ui.Button(c, a.tr("取消", "Cancel")).OnClick(func() { form.open = false })
+					if form.canOverwrite {
+						ui.Button(c, a.tr("覆盖", "Overwrite")).OnClick(func() { form.open = false; form.conflict(true) })
+					}
+					ui.PrimaryButton(c, a.tr("自动重命名", "Auto Rename")).OnClick(func() { form.open = false; form.conflict(false) })
+				})
+				return
+			}
 			if form.remove {
 				message := a.tr("删除「%s」？", "Delete “%s”?")
 				if form.item.IsDir() {
 					message = a.tr("删除文件夹「%s」？仅可删除空文件夹。", "Delete folder “%s”? Only empty folders can be deleted.")
+				}
+				if form.item.IsDir() && form.pane == &f.remote {
+					message = a.tr("删除文件夹「%s」及其全部内容？", "Delete folder “%s” and all of its contents?")
 				}
 				ui.Text(c, fmt.Sprintf(message, form.item.Name()))
 			} else {
@@ -268,6 +285,9 @@ func (a *localTerm) fileActionDialog(c *ui.Context, f *fileSession, form *fileFo
 					a.refreshFiles(f, p, p.dir, func(loc fileLocation) error {
 						switch {
 						case remove:
+							if loc.client != nil {
+								return loc.removeRemoteTree(f.ctx, item.Name())
+							}
 							return loc.remove(item.Name(), item.IsDir())
 						case item != nil:
 							return loc.rename(item.Name(), name)
@@ -290,7 +310,7 @@ func (f *fileSession) location(p *filePane) fileLocation {
 }
 
 func (a *localTerm) transferFile(f *fileSession, p *filePane, item os.FileInfo) {
-	if !f.canTransfer(item) {
+	if !f.canTransfer(p, item) {
 		return
 	}
 	destination := &f.remote
@@ -298,8 +318,67 @@ func (a *localTerm) transferFile(f *fileSession, p *filePane, item os.FileInfo) 
 		destination = &f.local
 	}
 	source := f.location(p)
-	a.refreshFiles(f, destination, destination.dir, func(target fileLocation) error {
-		return copySFTPFile(f.ctx, source, target, item.Name())
+	name := item.Name()
+	if p == &f.remote {
+		a.refreshFiles(f, destination, destination.dir, func(target fileLocation) error {
+			return copySFTPFile(f.ctx, source, target, name)
+		})
+		return
+	}
+
+	upload := func(target fileLocation, destName string, overwrite bool) error {
+		if !validFileName(name) {
+			return fmt.Errorf("invalid file name %q", name)
+		}
+		if item.IsDir() {
+			return copySFTPDirectory(f.ctx, source, target, name, destName)
+		}
+		return copySFTPFileAs(f.ctx, source, target, name, destName, overwrite)
+	}
+	var existing os.FileInfo
+	a.updateFiles(f, destination, destination.dir, "", func(target fileLocation) error {
+		var err error
+		existing, err = target.stat(name)
+		if os.IsNotExist(err) {
+			return upload(target, name, false)
+		}
+		return err
+	}, func() {
+		if existing == nil {
+			return
+		}
+		f.form = &fileForm{
+			title: a.tr("上传名称冲突", "Upload Name Conflict"), name: name, open: true,
+			canOverwrite: item.Mode().IsRegular() && existing.Mode().IsRegular(),
+			conflict: func(overwrite bool) {
+				a.refreshFiles(f, destination, destination.dir, func(target fileLocation) error {
+					if overwrite {
+						return upload(target, name, true)
+					}
+					ext := ""
+					if !item.IsDir() {
+						ext = path.Ext(name)
+						if ext == name {
+							ext = ""
+						}
+					}
+					for i := 1; ; i++ {
+						if err := f.ctx.Err(); err != nil {
+							return err
+						}
+						candidate := fmt.Sprintf("%s (%d)%s", strings.TrimSuffix(name, ext), i, ext)
+						_, err := target.stat(candidate)
+						if os.IsNotExist(err) {
+							return upload(target, candidate, false)
+						}
+						if err != nil {
+							return err
+						}
+					}
+				})
+			},
+		}
+		f.status = ""
 	})
 }
 
@@ -308,6 +387,10 @@ func (a *localTerm) refreshFiles(f *fileSession, p *filePane, dir string, change
 }
 
 func (a *localTerm) refreshFileSelection(f *fileSession, p *filePane, dir, selection string, change func(fileLocation) error) {
+	a.updateFiles(f, p, dir, selection, change, nil)
+}
+
+func (a *localTerm) updateFiles(f *fileSession, p *filePane, dir, selection string, change func(fileLocation) error, after func()) {
 	if f.busy || p.dir == "" || dir == "" || p == &f.remote && f.client == nil {
 		return
 	}
@@ -319,21 +402,22 @@ func (a *localTerm) refreshFileSelection(f *fileSession, p *filePane, dir, selec
 		if change != nil {
 			err = change(loc)
 		}
-		var current string
-		var items []os.FileInfo
+		current, items, readErr := loc.read(dir)
 		if err == nil {
-			current, items, err = loc.read(dir)
+			err = readErr
 		}
 		return func() {
 			if f.ctx.Err() != nil {
 				return
 			}
 			f.busy = false
+			if readErr == nil {
+				p.show(current, items)
+			}
 			if err != nil {
 				f.status = strings.TrimSpace(err.Error())
 				return
 			}
-			p.show(current, items)
 			f.status = ""
 			if selection != "" {
 				p.selected = selection
@@ -344,6 +428,9 @@ func (a *localTerm) refreshFileSelection(f *fileSession, p *filePane, dir, selec
 			}
 			if change != nil {
 				f.status = a.tr("操作完成", "Operation complete")
+			}
+			if after != nil {
+				after()
 			}
 		}
 	})

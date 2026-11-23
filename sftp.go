@@ -289,6 +289,78 @@ func (l fileLocation) remove(name string, directory bool) error {
 	return os.Remove(target)
 }
 
+func (l fileLocation) stat(name string) (os.FileInfo, error) {
+	if l.client != nil {
+		return l.client.Lstat(l.resolve(name))
+	}
+	return os.Lstat(l.resolve(name))
+}
+
+func (l fileLocation) removeRemoteTree(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	info, err := l.stat(name)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		items, err := l.client.ReadDir(l.resolve(name))
+		if err != nil {
+			return err
+		}
+		for _, item := range items {
+			if !validFileName(item.Name()) {
+				return fmt.Errorf("invalid file name %q", item.Name())
+			}
+			if err := l.removeRemoteTree(ctx, path.Join(name, item.Name())); err != nil {
+				return err
+			}
+		}
+	}
+	return l.remove(name, info.IsDir())
+}
+
+func copySFTPDirectory(ctx context.Context, source, destination fileLocation, name, target string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	info, err := source.stat(name)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return &os.PathError{Op: "upload directory", Path: source.resolve(name), Err: os.ErrInvalid}
+	}
+	items, err := os.ReadDir(source.resolve(name))
+	if err != nil {
+		return err
+	}
+	if err := destination.mkdir(target); err != nil {
+		return err
+	}
+	source.dir = source.resolve(name)
+	destination.dir = destination.resolve(target)
+	for _, item := range items {
+		child := item.Name()
+		if !validFileName(child) {
+			return fmt.Errorf("invalid file name %q", child)
+		}
+		switch {
+		case item.IsDir():
+			err = copySFTPDirectory(ctx, source, destination, child, child)
+		case item.Type().IsRegular():
+			err = copySFTPFile(ctx, source, destination, child)
+		default:
+			err = fmt.Errorf("unsupported file type: %s", source.resolve(child))
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (l fileLocation) open(name string) (io.ReadCloser, error) {
 	target := l.resolve(name)
 	if l.client != nil {
@@ -306,8 +378,12 @@ func (l fileLocation) create(name string) (io.WriteCloser, error) {
 	return os.OpenFile(target, flags, 0o644)
 }
 
-func copySFTPFile(ctx context.Context, source, destination fileLocation, name string) (err error) {
-	if !validFileName(name) {
+func copySFTPFile(ctx context.Context, source, destination fileLocation, name string) error {
+	return copySFTPFileAs(ctx, source, destination, name, name, false)
+}
+
+func copySFTPFileAs(ctx context.Context, source, destination fileLocation, name, destName string, overwrite bool) (err error) {
+	if !validFileName(name) || !validFileName(destName) {
 		return fmt.Errorf("invalid file name %q", name)
 	}
 	in, err := source.open(name)
@@ -315,9 +391,9 @@ func copySFTPFile(ctx context.Context, source, destination fileLocation, name st
 		return err
 	}
 	defer in.Close()
-	target := name
-	// Publish from a staging file when the destination supports hard links.
-	stage := destination.client == nil
+	target := destName
+	// Stage before overwriting or publishing through a hard link.
+	stage := overwrite || destination.client == nil
 	if !stage {
 		_, stage = destination.client.HasExtension("hardlink@openssh.com")
 	}
@@ -343,7 +419,25 @@ func copySFTPFile(ctx context.Context, source, destination fileLocation, name st
 	if !stage {
 		return nil
 	}
-	from, to := destination.resolve(target), destination.resolve(name)
+	from, to := destination.resolve(target), destination.resolve(destName)
+	if overwrite {
+		info, err := destination.stat(destName)
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return &os.PathError{Op: "overwrite", Path: to, Err: os.ErrExist}
+		}
+		if _, ok := destination.client.HasExtension("posix-rename@openssh.com"); ok {
+			err = destination.client.PosixRename(from, to)
+		} else {
+			err = destination.client.Rename(from, to)
+		}
+		if err == nil {
+			stage = false
+		}
+		return err
+	}
 	if destination.client != nil {
 		return destination.client.Link(from, to)
 	}

@@ -76,6 +76,11 @@ func TestSFTPBrowserMenus(t *testing.T) {
 	write(localDir, "upload.txt", "overwrite attempt")
 	choose("upload.txt", "上传")
 	check(remoteDir, "upload.txt", "from local")
+	click(t, view, "自动重命名")
+	check(remoteDir, "upload (1).txt", "overwrite attempt")
+	choose("upload.txt", "上传")
+	click(t, view, "覆盖")
+	check(remoteDir, "upload.txt", "overwrite attempt")
 	choose("download.txt", "下载")
 	check(localDir, "download.txt", "from remote")
 	choose("download.txt", "重命名…")
@@ -93,6 +98,11 @@ func TestSFTPBrowserMenus(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(localDir, "renamed.txt")); !os.IsNotExist(err) {
 		t.Fatalf("deleted file remains: %v", err)
 	}
+	choose("download.txt", "删除…")
+	click(t, view, "确认删除")
+	if _, err := os.Lstat(filepath.Join(remoteDir, "download.txt")); !os.IsNotExist(err) {
+		t.Fatalf("deleted remote file remains: %v", err)
+	}
 	choose("upload.txt", "新建文件夹…")
 	view.Type("Test folder")
 	click(t, view, "创建")
@@ -101,6 +111,9 @@ func TestSFTPBrowserMenus(t *testing.T) {
 		t.Fatalf("opening new folder displayed %q", f.local.dir)
 	}
 	write(f.local.dir, "new local.txt", "created outside the app")
+	if err := os.Mkdir(filepath.Join(f.local.dir, "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	view.RightClickAt(left.X+40, left.Y+100)
 	if err := view.ChooseMenuItem("刷新"); err != nil {
 		t.Fatal(err)
@@ -134,6 +147,18 @@ func TestSFTPBrowserMenus(t *testing.T) {
 	click(t, view, "本地 · 收藏路径")
 	if err := view.ChooseMenuItem("移除收藏", file); err != nil {
 		t.Fatal(err)
+	}
+	click(t, view, "上一级")
+	choose("Test folder", "上传")
+	check(filepath.Join(remoteDir, "Test folder"), "new local.txt", "created outside the app")
+	if info, err := os.Stat(filepath.Join(remoteDir, "Test folder", "empty")); err != nil || !info.IsDir() {
+		t.Fatalf("empty folder was not uploaded: %v", err)
+	}
+	choose("Test folder", "打开目录")
+	choose("Test folder", "删除…")
+	click(t, view, "确认删除")
+	if _, err := os.Lstat(filepath.Join(remoteDir, "Test folder")); !os.IsNotExist(err) {
+		t.Fatalf("deleted remote folder remains: %v", err)
 	}
 	if len(app.preferences.SFTPFavorites[""]) != 1 {
 		t.Fatal("the chosen favorite was not removed")
