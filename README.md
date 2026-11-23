@@ -37,6 +37,20 @@ mise run vet
 
 可将 `MYGO_GHOSTTY_VT` 指向本机兼容的 Ghostty 动态库，再运行测试以覆盖真实 PTY、工作目录和终端页签生命周期。
 
+## 本地编译替换
+
+改完代码后，可用脚本编译并替换已安装的 `/Applications/Hostern.app`：
+
+```sh
+./scripts/install-local.sh
+```
+
+脚本默认先运行 `go test`（跳过会下载 Ghostty 动态库的用例），只构建当前机器架构，不生成 DMG、不做公证，也不签名更新包。替换前它会退出正在运行的 Hostern，把原应用备份到临时目录，替换完成后重新启动。选项：`--no-launch` 不重启应用；`--skip-test` 跳过测试。
+
+脚本会自动使用 `mise.toml` 固定的 Go 和 MyGo。需要写入 `/Applications` 时，请从有相应权限的终端运行；也可用 `HOSTERN_INSTALL_DIR` 指定其他安装目录。
+
+对于已用脚本安装 ad hoc 签名的本地版本，程序内的更新器无法自动更新，请重新运行脚本，或从 Release 下载新版本覆盖安装。
+
 ## 发布和更新
 
 首次发布前，将与 `mygo.json` 中公钥配对的签名私钥保存为仓库的 GitHub Actions Secret `MYGO_UPDATER_PRIVATE_KEY`。后续发布需要继续使用同一把密钥，已有用户的应用会用内置公钥验证更新。
