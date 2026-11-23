@@ -189,6 +189,20 @@ func (a *localTerm) entryByID(id string) entry {
 	return entry{}
 }
 
+func (a *localTerm) editEntry(id string) {
+	open := func() {
+		if e := a.entryByID(id); e.ID != "" {
+			a.editor = &editor{entry: e, open: true}
+		}
+	}
+	// Open the modal in a window update after the native menu event.
+	if a.update != nil {
+		a.update(open)
+		return
+	}
+	open()
+}
+
 // runTask does blocking work off the UI thread, then publishes the result
 // on the window's thread. Standalone views have no window dispatcher.
 func (a *localTerm) runTask(work func() func()) {

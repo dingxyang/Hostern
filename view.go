@@ -308,19 +308,22 @@ func (a *localTerm) treeItems(c *ui.Context, children map[string][]entry, parent
 			a.newEntryMenu(m, e, false)
 			m.Separator()
 			if m.Item(a.tr("编辑", "Edit")).Chosen() {
-				a.editor = &editor{entry: e, open: true}
+				a.editEntry(e.ID)
 			}
 			if m.Item(a.tr("删除", "Delete")).Disabled(a.savingEntries).Chosen() {
 				a.requestDelete(c, e)
 			}
 		}
 		row.ContextMenu(menu)
-		if selected || row.Hovered() || row.Focused() {
-			row.Children(func() {
-				ui.Spacer(key)
-				iconButton(key, "⋯", a.tr("更多操作", "More actions")).Menu(menu)
-			})
-		}
+		showActions := selected || row.Hovered() || row.FocusWithin()
+		row.Children(func() {
+			ui.Spacer(key)
+			button := iconButton(key, "⋯", a.tr("更多操作", "More actions")).Menu(menu)
+			// Keep the menu owner in the tree while the native menu tracks the pointer.
+			if !showActions {
+				button.Invisible()
+			}
+		})
 	}
 }
 

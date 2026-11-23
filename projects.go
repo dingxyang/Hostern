@@ -160,7 +160,7 @@ func (a *localTerm) projectTab(c *ui.Context, e entry) {
 	if e.ID != "" {
 		tile.ContextMenu(func(m *ui.Menu) {
 			if m.Item(a.tr("编辑配置", "Edit configuration")).Chosen() {
-				a.editor = &editor{entry: e, open: true}
+				a.editEntry(e.ID)
 			}
 			if m.Item(a.tr("关闭项目页签", "Close project tab")).Disabled(a.savingEntries).Chosen() {
 				a.setProjectVisible(c, e, false)
