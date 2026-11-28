@@ -42,6 +42,7 @@ type preferences struct {
 	Size                string                       `json:"terminalFontSize"`
 	SkipStartupTerminal bool                         `json:"skipStartupTerminal,omitempty"`
 	SelectedConnection  string                       `json:"selectedConnection,omitempty"`
+	ViewMode            string                       `json:"viewMode,omitempty"`
 	Shortcuts           [len(shortcutActions)]string `json:"shortcuts"`
 	AgentArguments      [len(agentLaunchers)]string  `json:"agentArguments,omitzero"`
 	QuickCommands       []quickCommand               `json:"quickCommands,omitempty"`
@@ -132,6 +133,7 @@ func (a *localTerm) saveSettings() {
 	}
 	next := a.settingsDraft.withDefaults()
 	next.SFTPFavorites = a.preferences.SFTPFavorites
+	next.ViewMode = a.preferences.ViewMode
 	for i, chord := range next.Shortcuts {
 		if chord != "—" && slices.Contains(next.Shortcuts[:i], chord) {
 			a.settingsTab, a.settingsSearch = settingsShortcutsTab, ""

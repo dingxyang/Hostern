@@ -141,7 +141,11 @@ func (a *localTerm) terminalMenu(c *ui.Context, m *ui.Menu, s *session, selectio
 			c.Toast(a.tr("无法获取当前工作目录", "Could not get the current working directory"))
 			return
 		}
-		a.newEntry(local, a.selectedEntry(), true)
+		target := a.selectedEntry()
+		if a.minimalView {
+			target = entry{}
+		}
+		a.newEntry(local, target, true)
 		a.editor.entry.Name = filepath.Base(path)
 		a.editor.entry.Path = path
 	}

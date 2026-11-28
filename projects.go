@@ -29,9 +29,15 @@ func (a *localTerm) projectSession(id string) *session {
 
 func (a *localTerm) toggleProjects() {
 	a.projectView = !a.projectView
-	a.syncProject()
-	if !a.projectView && a.active == nil && len(a.tabs) > 0 {
-		a.activate(a.tabs[len(a.tabs)-1])
+	if a.projectView {
+		a.minimalView = false
+		a.syncProject()
+		a.saveViewMode(viewModeProjects)
+	} else {
+		if a.active == nil && len(a.tabs) > 0 {
+			a.activate(a.tabs[len(a.tabs)-1])
+		}
+		a.saveViewMode(viewModeSidebar)
 	}
 	a.focusTab = a.active != nil
 }

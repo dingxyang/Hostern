@@ -33,6 +33,16 @@ func (a *localTerm) newTerminalMenu(c *ui.Context, m *ui.Menu) {
 	if project.Kind == host && m.Item(a.tr("打开 SFTP", "Open SFTP")).Chosen() {
 		a.launchSFTP(project)
 	}
+	if a.minimalView && len(a.entries) > 0 {
+		children := make(map[string][]entry)
+		for _, e := range a.entries {
+			children[e.Parent] = append(children[e.Parent], e)
+		}
+		if len(children[""]) > 0 {
+			m.Separator()
+			a.connectionTreeMenu(m, children, "")
+		}
+	}
 	m.Separator()
 	for i, agent := range agentLaunchers {
 		_, err := exec.LookPath(agent.command)
@@ -55,6 +65,25 @@ func (a *localTerm) newTerminalMenu(c *ui.Context, m *ui.Menu) {
 	if m.Item(a.tr("配置 Agent 启动参数…", "Configure Agent Launch Arguments…")).Chosen() {
 		a.openSettings()
 		a.settingsTab = settingsAgentsTab
+	}
+	if a.minimalView && m.Item(a.tr("设置…", "Settings…")).Chosen() {
+		a.openSettings()
+	}
+}
+
+func (a *localTerm) connectionTreeMenu(m *ui.Menu, children map[string][]entry, parent string) {
+	for _, e := range children[parent] {
+		switch e.Kind {
+		case category:
+			items := children[e.ID]
+			m.Submenu(e.Name, func(sub *ui.Menu) {
+				a.connectionTreeMenu(sub, children, e.ID)
+			}).Disabled(len(items) == 0)
+		case host, local:
+			if m.Item(e.Name).Chosen() {
+				a.launch(e)
+			}
+		}
 	}
 }
 

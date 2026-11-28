@@ -34,7 +34,7 @@ func (a *localTerm) view(c *ui.Context) {
 				a.settingsView(c)
 			} else if a.projectView {
 				a.projects(c)
-			} else if a.sidebarHidden {
+			} else if a.minimalView || a.sidebarHidden {
 				a.terminals(c)
 			} else {
 				ui.Split(c, &a.sidebar, func() { a.connections(c) }, func() { a.terminals(c) }).Fill()
@@ -61,15 +61,15 @@ func (a *localTerm) view(c *ui.Context) {
 func (a *localTerm) windowToolbar(c *ui.Context) {
 	bar := c.TitleBar()
 	label := a.tr("隐藏侧栏", "Hide sidebar")
-	if a.sidebarHidden || a.projectView {
+	if a.sidebarHidden || a.projectView || a.minimalView {
 		label = a.tr("显示侧栏", "Show sidebar")
 	}
 	const controlWidth = 30
-	const projectButtonMargin = 4
+	const modeButtonMargin = 4
 	const leftPadding = 8
-	controlsEnd := bar.Left + leftPadding + 2*controlWidth + 2*projectButtonMargin
+	controlsEnd := bar.Left + leftPadding + 3*controlWidth + 3*modeButtonMargin
 	tabStart := controlsEnd
-	if !a.projectView && !a.sidebarHidden {
+	if !a.projectView && !a.minimalView && !a.sidebarHidden {
 		tabStart = max(tabStart, a.sidebar+1)
 	}
 	ui.Row(c).Height(max(bar.Height, 32)).Shrink(0).AlignItems(ui.Center).
@@ -87,7 +87,7 @@ func (a *localTerm) windowToolbar(c *ui.Context) {
 		})
 		modeLabel := a.tr("项目视图", "Project view")
 		theme := c.Theme()
-		mode := ui.ButtonBase(c).Size(controlWidth, 26).Margin(0, projectButtonMargin).Shrink(0).Radius(5).Center().
+		mode := ui.ButtonBase(c).Size(controlWidth, 26).Margin(0, modeButtonMargin).Shrink(0).Radius(5).Center().
 			Label(modeLabel).Tooltip(modeLabel).Selected(a.projectView).Background(ui.Transparent).OnClick(a.toggleProjects)
 		iconColor := theme.TextMuted
 		if a.projectView {
@@ -102,6 +102,25 @@ func (a *localTerm) windowToolbar(c *ui.Context) {
 					p.Fill(ui.Rect{X: r.X + 1, Y: r.Y + offset, W: 3, H: 3}, iconColor, 0.8)
 				}
 				p.Stroke(ui.Rect{X: r.X + 7, Y: r.Y + 1, W: 10, H: 14}, iconColor, 2, 1.3)
+			})
+		})
+		minimalLabel := a.tr("极简模式", "Minimal mode")
+		minimal := ui.ButtonBase(c).Size(controlWidth, 26).Margin(0, modeButtonMargin, 0, 0).Shrink(0).Radius(5).Center().
+			Label(minimalLabel).Tooltip(minimalLabel).Selected(a.minimalView).Background(ui.Transparent).OnClick(a.toggleMinimal)
+		minimalColor := theme.TextMuted
+		if a.minimalView {
+			minimal.Background(theme.Selection)
+			minimalColor = theme.Text
+		} else if minimal.Hovered() {
+			minimal.Background(theme.SurfaceHover)
+		}
+		minimal.Children(func() {
+			ui.Box(c).Size(18, 16).Draw(func(p *ui.Painter, r ui.Rect) {
+				p.Stroke(ui.Rect{X: r.X + 1, Y: r.Y + 1, W: r.W - 2, H: r.H - 2}, minimalColor, 3, 1.3)
+				var prompt ui.Path
+				prompt.MoveTo(r.X+5, r.Y+5.5).LineTo(r.X+7.5, r.Y+8).LineTo(r.X+5, r.Y+10.5)
+				p.StrokePath(&prompt, 1.3, minimalColor)
+				p.Line(r.X+9.5, r.Y+10.5, r.X+13, r.Y+10.5, 1.3, minimalColor)
 			})
 		})
 		if tabStart > controlsEnd {

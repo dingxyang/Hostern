@@ -73,6 +73,7 @@ type localTerm struct {
 	sidebar           float32
 	sidebarHidden     bool
 	projectView       bool
+	minimalView       bool
 	projectID         string
 	openOnStart       bool
 
@@ -134,6 +135,7 @@ func main() {
 		}
 		app.storeError = err
 		app.restoreConnectionSelection()
+		app.restoreViewMode()
 		mygo.Theme.SetSource(normalizeAppearance(app.preferences.Appearance))
 		app.win = mygo.NewWindow(mygo.WindowOptions{
 			Title: "Hostern", Width: 1080, Height: 680,
@@ -450,9 +452,42 @@ func (a *localTerm) launchSession(e entry, files *fileSession) {
 	})
 }
 
+const (
+	viewModeSidebar  = "sidebar"
+	viewModeProjects = "projects"
+	viewModeMinimal  = "minimal"
+)
+
+func (a *localTerm) restoreViewMode() {
+	switch a.preferences.ViewMode {
+	case viewModeProjects:
+		a.projectView = true
+		a.minimalView = false
+		a.syncProject()
+	case viewModeMinimal:
+		a.minimalView = true
+		a.projectView = false
+	default:
+		a.projectView = false
+		a.minimalView = false
+	}
+}
+
+func (a *localTerm) saveViewMode(mode string) {
+	if a.settingsPath == "" || a.preferences.ViewMode == mode {
+		return
+	}
+	next := a.preferences
+	next.ViewMode = mode
+	if err := saveJSON(a.settingsPath, next); err != nil {
+		return
+	}
+	a.preferences = next
+}
+
 func (a *localTerm) openLocal(c *ui.Context) {
 	e := a.selectedEntry()
-	if !a.projectView && e.Kind == local && checkDirectory(e.Path) == nil {
+	if !a.projectView && !a.minimalView && e.Kind == local && checkDirectory(e.Path) == nil {
 		e.StartupCommand = ""
 		a.launch(e)
 		return
@@ -471,6 +506,25 @@ func (a *localTerm) toggleSidebar() {
 		a.sidebarHidden = false
 		return
 	}
+	if a.minimalView {
+		a.toggleMinimal()
+		return
+	}
 	a.sidebarHidden = !a.sidebarHidden
+	a.focusTab = a.active != nil
+}
+
+func (a *localTerm) toggleMinimal() {
+	a.minimalView = !a.minimalView
+	if a.minimalView {
+		a.projectView = false
+		if a.active == nil && len(a.tabs) > 0 {
+			a.activate(a.tabs[len(a.tabs)-1])
+		}
+		a.saveViewMode(viewModeMinimal)
+	} else {
+		a.sidebarHidden = false
+		a.saveViewMode(viewModeSidebar)
+	}
 	a.focusTab = a.active != nil
 }

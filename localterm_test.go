@@ -1287,3 +1287,100 @@ func TestProjectRailScrollKeepsSettingsVisible(t *testing.T) {
 		t.Fatal("back did not return to the project view")
 	}
 }
+
+func TestMinimalModeUI(t *testing.T) {
+	settingsPath := filepath.Join(t.TempDir(), "settings.json")
+	dir := t.TempDir()
+	entries := []entry{
+		{ID: "ops", Kind: category, Name: "运维"},
+		{ID: "nested", Parent: "ops", Kind: category, Name: "生产"},
+		{ID: "prod", Parent: "nested", Kind: host, Name: "生产机", Host: "prod.example.com"},
+		{ID: "empty", Kind: category, Name: "空分组"},
+		{ID: "root-dir", Kind: local, Name: "工作目录", Path: dir},
+		{ID: "root-host", Kind: host, Name: "开发机", Host: "dev.example.com"},
+	}
+	updates := make(chan func(), 4)
+	app := &localTerm{
+		sidebar:      270,
+		expanded:     make(map[string]*bool),
+		settingsPath: settingsPath,
+		entries:      entries,
+		update:       func(fn func()) { updates <- fn },
+	}
+	view := ui.NewTester(app.view, 800, 530)
+
+	click(t, view, "极简模式")
+	if !app.minimalView || app.projectView {
+		t.Fatal("clicking minimal mode did not enter minimal view")
+	}
+	if _, found := view.Find("搜索连接"); found {
+		t.Fatal("sidebar should be hidden in minimal mode")
+	}
+	saved, err := loadPreferences(settingsPath)
+	if err != nil || saved.ViewMode != viewModeMinimal {
+		t.Fatalf("minimal mode was not persisted: %+v, err=%v", saved, err)
+	}
+
+	click(t, view, "新建终端")
+	if err := view.ChooseMenuItem("空分组"); err == nil {
+		t.Fatal("empty category should be disabled in the new terminal menu")
+	}
+	if err := view.ChooseMenuItem("运维", "生产", "生产机"); err != nil {
+		t.Fatalf("nested host was not reachable from the new terminal menu: %v", err)
+	}
+	if app.active == nil || app.active.entryID != "prod" || app.active.name != "生产机" {
+		t.Fatalf("choosing a nested host did not launch its session: %+v", app.active)
+	}
+
+	click(t, view, "新建终端")
+	if err := view.ChooseMenuItem("工作目录"); err != nil {
+		t.Fatalf("root local directory was not reachable from the new terminal menu: %v", err)
+	}
+	if app.active == nil || app.active.entryID != "root-dir" || app.active.name != "工作目录" {
+		t.Fatalf("choosing a local directory did not launch its session: %+v", app.active)
+	}
+
+	click(t, view, "新建终端")
+	if err := view.ChooseMenuItem("设置…"); err != nil {
+		t.Fatalf("settings should be accessible from the minimal mode menu: %v", err)
+	}
+	if !app.settingsOpen {
+		t.Fatal("choosing settings from the minimal mode menu did not open settings")
+	}
+	click(t, view, "返回")
+	if app.settingsOpen || !app.minimalView {
+		t.Fatal("closing settings should return to minimal mode")
+	}
+
+	// Restoring preferences on startup should re-enter minimal mode.
+	restored := &localTerm{
+		sidebar:     270,
+		expanded:    make(map[string]*bool),
+		preferences: saved,
+		entries:     entries,
+	}
+	restored.restoreViewMode()
+	if !restored.minimalView || restored.projectView {
+		t.Fatalf("restoreViewMode did not restore minimal mode: minimal=%v project=%v", restored.minimalView, restored.projectView)
+	}
+
+	// Switching to project view and back to sidebar should persist each mode.
+	click(t, view, "项目视图")
+	if !app.projectView || app.minimalView {
+		t.Fatal("clicking project view should leave minimal mode")
+	}
+	if saved, err = loadPreferences(settingsPath); err != nil || saved.ViewMode != viewModeProjects {
+		t.Fatalf("project view mode was not persisted: %+v, err=%v", saved, err)
+	}
+	click(t, view, "显示侧栏")
+	if app.projectView || app.minimalView || app.sidebarHidden {
+		t.Fatal("clicking show sidebar should return to the connection tree")
+	}
+	if saved, err = loadPreferences(settingsPath); err != nil || saved.ViewMode != viewModeSidebar {
+		t.Fatalf("sidebar view mode was not persisted: %+v, err=%v", saved, err)
+	}
+	click(t, view, "新建终端")
+	if err := view.ChooseMenuItem("工作目录"); err == nil {
+		t.Fatal("connection tree entries should only appear in the new terminal menu in minimal mode")
+	}
+}
